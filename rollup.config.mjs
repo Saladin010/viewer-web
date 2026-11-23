@@ -311,11 +311,18 @@ const buildSettingsTypes = {
 
 const buildRealEstate = {
     input: 'src/realestate/index.ts',
-    output: {
-        file: 'dist/realestate.js',
-        format: 'esm',
-        sourcemap: true
-    },
+    output: [
+        {
+            file: 'dist/realestate.js',
+            format: 'esm',
+            sourcemap: true
+        },
+        {
+            file: 'public/realestate.js',
+            format: 'esm',
+            sourcemap: true
+        }
+    ],
     external: engineExternal,
     plugins: [resolve(), typescriptPlugin({ noEmit: true }), json()]
 };
