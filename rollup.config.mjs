@@ -309,15 +309,35 @@ const buildSettingsTypes = {
     plugins: [dts()]
 };
 
+const buildRealEstate = {
+    input: 'src/realestate/index.ts',
+    output: {
+        file: 'dist/realestate.js',
+        format: 'esm',
+        sourcemap: true
+    },
+    external: engineExternal,
+    plugins: [resolve(), typescriptPlugin({ noEmit: true }), json()]
+};
+
+const buildRealEstateTypes = {
+    input: 'src/realestate/index.ts',
+    output: { file: 'dist/realestate.d.ts', format: 'es' },
+    external: [...engineExternal],
+    plugins: [dts()]
+};
+
 export default [
     buildCss,
     buildPublic,
     buildDist,
     buildViewer,
+    buildRealEstate,
     buildGsafDecoder,
     buildSettings,
     buildDistTypes,
     buildViewerTypes,
+    buildRealEstateTypes,
     buildGsafDecoderTypes,
     buildSettingsTypes
 ];

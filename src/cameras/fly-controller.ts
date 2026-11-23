@@ -135,7 +135,7 @@ class FlyController implements CameraController {
 
         const { move, rotate } = inputFrame.read();
 
-        applyFrameRotation(this._targetAngles, rotate);
+        applyFrameRotation(this._targetAngles, rotate, -80, 80);
         dampAngles(this._angles, this._targetAngles, this.rotateDamping, deltaTime);
 
         this._step(move);

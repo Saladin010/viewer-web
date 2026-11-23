@@ -26,6 +26,10 @@
       "types": "./dist/viewer.d.ts",
       "import": "./dist/viewer.js"
     },
+    "./realestate": {
+      "types": "./dist/realestate.d.ts",
+      "import": "./dist/realestate.js"
+    },
     "./viewer.css": "./dist/viewer.css",
     "./gsaf-decoder": {
       "types": "./dist/gsaf-decoder.d.ts",

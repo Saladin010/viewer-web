@@ -101,7 +101,12 @@ class WalkController implements CameraController {
     /**
      * Movement speed in m/s when grounded
      */
-    moveGroundSpeed = 7;
+    moveGroundSpeed = 1.2;
+
+    /**
+     * Optional crop bounds for soft boundary clamping [minX, minY, minZ] to [maxX, maxY, maxZ]
+     */
+    cropBounds: { min: [number, number, number]; max: [number, number, number] } | null = null;
 
     /**
      * Movement speed in m/s when in the air (for air control)
@@ -248,8 +253,8 @@ class WalkController implements CameraController {
     update(deltaTime: number, inputFrame: CameraFrame, camera: Camera) {
         const { move, rotate } = inputFrame.read();
 
-        // apply rotation at display rate for responsive mouse look
-        applyFrameRotation(this._targetAngles, rotate);
+        // apply rotation at display rate for responsive mouse look (pitch clamped strictly to +-80 deg)
+        applyFrameRotation(this._targetAngles, rotate, -80, 80);
         dampAngles(this._angles, this._targetAngles, this.rotateDamping, deltaTime);
 
         // accumulate movement input so frames without a physics step don't lose input
@@ -351,6 +356,13 @@ class WalkController implements CameraController {
         this._velocity.z = math.lerp(this._velocity.z, 0, alpha);
 
         this._position.add(v.copy(this._velocity).mulScalar(dt));
+
+        // crop bounds clamping
+        if (this.cropBounds) {
+            this._position.x = math.clamp(this._position.x, this.cropBounds.min[0], this.cropBounds.max[0]);
+            this._position.y = math.clamp(this._position.y, this.cropBounds.min[1], this.cropBounds.max[1]);
+            this._position.z = math.clamp(this._position.z, this.cropBounds.min[2], this.cropBounds.max[2]);
+        }
 
         // capsule collision: walls, ceiling, and fallback floor contact
         this._checkCollision(this._position, d);
