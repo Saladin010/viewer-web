@@ -15,7 +15,7 @@ export function resolveApiBaseUrl(url: URL): string {
         return window.location.origin;
     }
 
-    return 'https://api.realestate3d.local';
+    return 'https://orcaz.runasp.net';
 }
 
 export function extractShareToken(url: URL): string | null {
