@@ -1,0 +1,127 @@
+import type { AppBase, ContainerResource, RenderComponent, StandardMaterial } from 'playcanvas';
+import { Asset, Color, Entity } from 'playcanvas';
+
+export const GLB_ENTITY_NAME = 'glbModel';
+
+export const isGlbUrl = (url: string): boolean => {
+    try {
+        const pathname = new URL(url, typeof window !== 'undefined' ? window.location.href : 'http://localhost').pathname.toLowerCase();
+        return pathname.endsWith('.glb');
+    } catch {
+        return url.split(/[?#]/)[0].toLowerCase().endsWith('.glb');
+    }
+};
+
+export const extractFilename = (url: string, fallback: string): string => {
+    try {
+        const pathname = new URL(url, typeof window !== 'undefined' ? window.location.href : 'http://localhost').pathname;
+        return pathname.split('/').pop() || fallback;
+    } catch {
+        const clean = url.split(/[?#]/)[0];
+        return clean.split('/').pop() || fallback;
+    }
+};
+
+/**
+ * Convert Meshroom baked PBR mesh materials to Unlit so wall/floor textures
+ * render at full true brightness without dark synthetic lighting.
+ */
+export const applyUnlitMaterials = (rootEntity: Entity): void => {
+    const renders = rootEntity.findComponents('render') as RenderComponent[];
+    for (const render of renders) {
+        for (const mi of render.meshInstances) {
+            const mat = mi.material as StandardMaterial | null;
+            if (!mat) continue;
+
+            mat.useLighting = false;
+            if (mat.diffuseMap) {
+                mat.emissiveMap = mat.diffuseMap;
+                mat.emissiveMapUv = mat.diffuseMapUv;
+                mat.emissiveMapChannel = mat.diffuseMapChannel;
+                mat.emissiveMapTiling.copy(mat.diffuseMapTiling);
+                mat.emissiveMapOffset.copy(mat.diffuseMapOffset);
+                mat.emissive = new Color(1, 1, 1);
+            } else if (mat.diffuse) {
+                mat.emissive = mat.diffuse.clone();
+            } else {
+                mat.emissive = new Color(1, 1, 1);
+            }
+
+            mat.diffuse = new Color(0, 0, 0);
+            mat.update();
+        }
+    }
+};
+
+export const loadGlbEntity = (
+    app: AppBase,
+    url: string,
+    filename?: string | null,
+    progressCallback?: (progress: number) => void,
+    cancelled?: () => boolean
+): Promise<{ entity: Entity; asset: Asset }> => {
+    const baseName = filename || extractFilename(url, 'scene.glb');
+    const assetName = baseName.toLowerCase().endsWith('.glb') ? baseName : `${baseName}.glb`;
+    const asset = new Asset(assetName, 'container', { url, filename: assetName });
+
+    return new Promise<{ entity: Entity; asset: Asset }>((resolve, reject) => {
+        asset.on('load', () => {
+            if (cancelled?.()) {
+                app.assets.remove(asset);
+                asset.unload();
+                reject(new Error('loadGlbEntity: the viewer was destroyed while loading'));
+                return;
+            }
+            const resource = asset.resource as ContainerResource;
+            const containerEntity = resource.instantiateRenderEntity();
+            containerEntity.name = assetName;
+            applyUnlitMaterials(containerEntity);
+
+            const wrapper = new Entity(GLB_ENTITY_NAME, app);
+            wrapper.addChild(containerEntity);
+            (wrapper as Entity & { __containerAsset?: Asset }).__containerAsset = asset;
+            app.root.addChild(wrapper);
+            resolve({ entity: wrapper, asset });
+        });
+
+        let watermark = 0;
+        if (progressCallback) {
+            asset.on('progress', (received: number, length: number) => {
+                if (!length) return;
+                const progress = Math.min(1, received / length) * 100;
+                if (progress > watermark) {
+                    watermark = progress;
+                    progressCallback(Math.trunc(watermark));
+                }
+            });
+        }
+
+        asset.on('error', (err) => {
+            console.log(err);
+            reject(typeof err === 'string' ? new Error(err) : err);
+        });
+
+        app.assets.add(asset);
+        app.assets.load(asset);
+    });
+};
+
+export const disposeRoomEntities = (app: AppBase): void => {
+    const targets = app.root.children.filter(
+        (child) => child.name === 'gsplat' || child.name === GLB_ENTITY_NAME
+    );
+
+    for (const entity of targets) {
+        const gsplatComp = (entity as Entity & { gsplat?: { asset?: Asset } }).gsplat;
+        if (gsplatComp?.asset) {
+            app.assets.remove(gsplatComp.asset);
+            gsplatComp.asset.unload();
+        }
+        const containerAsset = (entity as Entity & { __containerAsset?: Asset }).__containerAsset;
+        if (containerAsset) {
+            app.assets.remove(containerAsset);
+            containerAsset.unload();
+        }
+        entity.destroy();
+    }
+};

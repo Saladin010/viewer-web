@@ -22,7 +22,7 @@ import {
     GSPLAT_RENDERER_RASTER_GPU_SORT,
     LAYERID_SKYBOX
 } from 'playcanvas';
-import type { CameraComponent, Entity, GraphicsDevice, GSplatComponent, Layer } from 'playcanvas';
+import type { CameraComponent, Entity, GraphicsDevice, GSplatComponent, Layer, RenderComponent } from 'playcanvas';
 
 import { CameraManager, isWalkAllowed } from './camera-manager';
 import type { Camera } from './cameras/camera';
@@ -493,7 +493,8 @@ class Viewer {
         if (!config.fullload) {
             gsplatLoad.then((entity) => {
                 if (this.destroyed) return;
-                const gsplatComponent = entity.gsplat as GSplatComponent;
+                const gsplatComponent = entity.gsplat as GSplatComponent | undefined;
+                if (!gsplatComponent) return;
                 const resource = gsplatComponent.resource as GSplatOctreeResourceLike | null;
                 const lodLevels = resource?.octree?.lodLevels;
                 if (lodLevels) {
@@ -510,8 +511,8 @@ class Viewer {
         // `gsplatLoad` alone lets the bar track the one load it can measure, from the moment
         // that load begins. The reveal below stops it and puts the bar at 100.
         let stopProgress: (() => void) | undefined;
-        gsplatLoad.then(() => {
-            if (this.destroyed) return;
+        gsplatLoad.then((entity) => {
+            if (this.destroyed || !entity.gsplat) return;
 
             const eventHandler = app.systems.gsplat;
 
@@ -581,12 +582,28 @@ class Viewer {
                 });
             }
 
-            const gsplatComponent = results[0].gsplat as GSplatComponent;
+            const gsplatComponent = results[0].gsplat as GSplatComponent | undefined;
 
-            // get scene bounding box
-            const gsplatBbox = gsplatComponent.customAabb;
-            if (gsplatBbox) {
-                sceneBound.setFromTransformedAabb(gsplatBbox, results[0].getWorldTransform());
+            // get scene bounding box (gsplat customAabb or union of .glb mesh bounds)
+            if (gsplatComponent) {
+                const gsplatBbox = gsplatComponent.customAabb;
+                if (gsplatBbox) {
+                    sceneBound.setFromTransformedAabb(gsplatBbox, results[0].getWorldTransform());
+                }
+            } else {
+                const renders = results[0].findComponents('render') as RenderComponent[];
+                let valid = false;
+                for (const render of renders) {
+                    for (const mi of render.meshInstances) {
+                        if (!mi.aabb) continue;
+                        if (!valid) {
+                            sceneBound.copy(mi.aabb);
+                            valid = true;
+                        } else {
+                            sceneBound.add(mi.aabb);
+                        }
+                    }
+                }
             }
 
             // the stochastic renderer leaves its frame's depth behind, so no pick pass is needed
@@ -701,17 +718,30 @@ class Viewer {
             // (quality.ts), from the Quality slider, the Stochastic setting and the session
             const applyPerfSettings = () => {
                 const { quality } = this.global;
-                gsplat.splatBudget = quality.budget * 1000000;
-                gsplat.colorUpdateAngle = quality.colorUpdateAngle;
-                gsplat.lodBehindPenalty = quality.lodBehindPenalty;
-                gsplat.lodUpdateAngle = quality.lodUpdateAngle;
-                gsplatComponent.lodRangeMin = 0;
-                gsplatComponent.lodRangeMax = 1000;
+                if (gsplatComponent) {
+                    gsplat.splatBudget = quality.budget * 1000000;
+                    gsplat.colorUpdateAngle = quality.colorUpdateAngle;
+                    gsplat.lodBehindPenalty = quality.lodBehindPenalty;
+                    gsplat.lodUpdateAngle = quality.lodUpdateAngle;
+                    gsplatComponent.lodRangeMin = 0;
+                    gsplatComponent.lodRangeMax = 1000;
+                }
 
                 // request a frame so the param changes are processed (full work-buffer
                 // rebuild) even when on-demand rendering is active and the camera is idle
                 app.renderNextFrame = true;
             };
+
+            if (!gsplatComponent) {
+                state.progress = 100;
+                if (!app.xr.active) app.autoRender = false;
+                app.renderNextFrame = true;
+                app.once('frameend', () => {
+                    events.fire('firstFrame');
+                    window.firstFrame?.();
+                });
+                return;
+            }
 
             if (config.fullload) {
                 // reveal once full quality has finished loading (used for screenshots)

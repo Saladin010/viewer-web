@@ -1,6 +1,7 @@
 import { Asset, Entity } from 'playcanvas';
 import type { CreateViewerOptions } from '../options';
 import type { ViewerHandle } from '../types';
+import { disposeRoomEntities, extractFilename, isGlbUrl, loadGlbEntity } from './glb-utils';
 import { RealEstateHUD } from './hud';
 import { loadRealEstateBootstrap } from './loader';
 import type { PropertyPublicShareDto, RealEstateBootstrapResult, SceneItemDto, SceneModelDto } from './types';
@@ -90,13 +91,25 @@ export async function initRealEstateViewer(
         };
     }
 
-    // 4. Create SuperSplat Viewer instance loading active room .sog
+    // 4. Create PlayCanvas Viewer instance loading active room (.glb mesh or .sog splat)
     try {
+        const initialFilename = extractFilename(
+            activeSceneModel.signedModelUrl,
+            isGlbUrl(activeSceneModel.signedModelUrl) ? 'scene.glb' : 'scene.sog'
+        );
+        const contentFilename = initialFilename.toLowerCase().endsWith('.glb')
+            ? initialFilename
+            : initialFilename.toLowerCase().endsWith('.sog') || initialFilename.toLowerCase().endsWith('.ply')
+                ? initialFilename
+                : isGlbUrl(activeSceneModel.signedModelUrl)
+                    ? 'scene.glb'
+                    : 'scene.sog';
+
         viewerHandle = await createViewerFn({
             container,
             settings: {},
             contentUrl: activeSceneModel.signedModelUrl,
-            contentFilename: 'scene.sog',
+            contentFilename,
             renderer: 'webgl',
             ui: true, // provide joystick & touch navigation layer
             exposeGlobals: true
@@ -146,42 +159,52 @@ export async function initRealEstateViewer(
 
         const app = viewerHandle.app;
 
-        // Prevent mobile OOM: destroy previous room's WebGL2 buffers before loading next room
+        // Prevent mobile OOM: destroy previous room's WebGL2 buffers & assets before loading next room
         try {
-            const existingGsplat = app.root.findByName('gsplat');
-            if (existingGsplat) {
-                const gsplatComp = (existingGsplat as any).gsplat;
-                if (gsplatComp?.asset) {
-                    app.assets.remove(gsplatComp.asset);
-                    gsplatComp.asset.unload();
-                }
-                existingGsplat.destroy();
+            if (currentGsplatAsset) {
+                app.assets.remove(currentGsplatAsset);
+                currentGsplatAsset.unload();
+                currentGsplatAsset = null;
             }
+            if (currentGsplatEntity) {
+                currentGsplatEntity.destroy();
+                currentGsplatEntity = null;
+            }
+            disposeRoomEntities(app);
 
-            // Load new room .sog
-            const filename = 'scene.sog';
-            const newAsset = new Asset(filename, 'gsplat', {
-                url: nextModel.signedModelUrl,
-                filename
-            });
-
-            await new Promise<void>((resolve, reject) => {
-                newAsset.on('load', () => {
-                    const entity = new Entity('gsplat', app);
-                    entity.setLocalEulerAngles(0, 0, 180);
-                    entity.addComponent('gsplat', {
-                        unified: true,
-                        asset: newAsset
-                    });
-                    app.root.addChild(entity);
-                    currentGsplatEntity = entity;
-                    currentGsplatAsset = newAsset;
-                    resolve();
+            if (isGlbUrl(nextModel.signedModelUrl)) {
+                const glbFilename = extractFilename(nextModel.signedModelUrl, 'scene.glb');
+                const { entity, asset } = await loadGlbEntity(app, nextModel.signedModelUrl, glbFilename);
+                currentGsplatEntity = entity;
+                currentGsplatAsset = asset;
+            } else {
+                const rawName = extractFilename(nextModel.signedModelUrl, 'scene.sog');
+                const filename = rawName.toLowerCase().endsWith('.ply') || rawName.toLowerCase().endsWith('.sog')
+                    ? rawName
+                    : 'scene.sog';
+                const newAsset = new Asset(filename, 'gsplat', {
+                    url: nextModel.signedModelUrl,
+                    filename
                 });
-                newAsset.on('error', (e) => reject(e));
-                app.assets.add(newAsset);
-                app.assets.load(newAsset);
-            });
+
+                await new Promise<void>((resolve, reject) => {
+                    newAsset.on('load', () => {
+                        const entity = new Entity('gsplat', app);
+                        entity.setLocalEulerAngles(0, 0, 180);
+                        entity.addComponent('gsplat', {
+                            unified: true,
+                            asset: newAsset
+                        });
+                        app.root.addChild(entity);
+                        currentGsplatEntity = entity;
+                        currentGsplatAsset = newAsset;
+                        resolve();
+                    });
+                    newAsset.on('error', (e) => reject(e));
+                    app.assets.add(newAsset);
+                    app.assets.load(newAsset);
+                });
+            }
 
             // Set camera pose
             if (targetPose?.position) {

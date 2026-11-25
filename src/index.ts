@@ -22,6 +22,7 @@ import { initLocalization } from './localization';
 import type { CreateViewerOptions } from './options';
 import { persistPreferences, readPreferences } from './preferences';
 import { canvasPixelRatio, Quality, resolutionScaleFor } from './quality';
+import { loadGlbEntity } from './realestate/glb-utils';
 import { importSettings } from './settings';
 import type { Config, Global, State, ViewerHandle } from './types';
 import { initPoster, initUI } from './ui';
@@ -48,7 +49,7 @@ const contentName = (contentUrl: string, contentFilename?: string | null) =>
 // response instead of opting out of it.
 const isPrefetchable = (contentUrl: string, contentFilename?: string | null) => {
     const name = contentName(contentUrl, contentFilename)?.toLowerCase();
-    return name !== 'lod-meta.json' && !name?.endsWith('.lcc2') && !name?.endsWith('.spz');
+    return name !== 'lod-meta.json' && !name?.endsWith('.lcc2') && !name?.endsWith('.spz') && !name?.endsWith('.glb');
 };
 
 // gsaf is an animated splat sequence, which the viewer decodes and plays itself rather than
@@ -65,6 +66,15 @@ const loadGsplat = async (
     const { contents, contentUrl, contentFilename } = config;
     const filename = contentName(contentUrl, contentFilename);
     const name = filename.toLowerCase();
+
+    if (name.endsWith('.glb')) {
+        if (cancelled()) {
+            throw new Error('loadGsplat: the viewer was destroyed while loading');
+        }
+        const { entity } = await loadGlbEntity(app, contentUrl, filename, progressCallback, cancelled);
+        return entity;
+    }
+
     const data = name === 'meta.json' ? await (await contents).json() : undefined;
     // The spz parser reads `asset.file.contents` only as an ArrayBuffer, so a fetch the caller
     // started is read to one here (the viewer starts none for spz, see `isPrefetchable`)
