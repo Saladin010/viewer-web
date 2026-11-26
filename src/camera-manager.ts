@@ -410,6 +410,26 @@ class CameraManager {
             state.animationTime = controllers.anim.animState.cursor.value;
         };
 
+        // Allow RealEstate host to snap/transition orbit pose to a Studio camera framing
+        events.on('realestate:gotoPose', (pose: { position: number[]; target: number[]; fov?: number; immediate?: boolean }) => {
+            if (!pose?.position || !pose?.target) return;
+            events.fire('orbitTarget:clear');
+            state.cameraMode = 'orbit';
+            const cam = createCamera(
+                new Vec3(pose.position[0], pose.position[1], pose.position[2]),
+                new Vec3(pose.target[0], pose.target[1], pose.target[2]),
+                pose.fov ?? defaultFov
+            );
+            controllers.orbit.goto(cam);
+            if (pose.immediate) {
+                target.copy(cam);
+                this.camera.copy(cam);
+                transitionTimer = 1;
+            } else {
+                startTransition(0.45);
+            }
+        });
+
         // handle user picking in the scene
         events.on('pick', (position: Vec3) => {
             // switch to orbit camera on pick

@@ -53,7 +53,7 @@ class TouchDevice implements InputDevice {
         const { isFly, isWalk, isFirstPerson, isOrbit, gamingControls, distance, cameraComponent } = ctx;
 
         // running touch count
-        this._touchCount += count[0];
+        this._touchCount = Math.max(0, this._touchCount + count[0]);
 
         // tap detection for click/tap target and focus modes
         if (isWalk || isFly || isOrbit) {

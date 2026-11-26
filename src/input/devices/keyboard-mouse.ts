@@ -128,8 +128,14 @@ class KeyboardMouseDevice implements InputDevice {
             this._buttons[i] += button[i];
         }
 
-        const { isFly, isWalk, isFirstPerson, gamingControls, dt, distance, cameraComponent, mode, touchCount } = ctx;
-        const pan = this._buttons[2] || +(button[2] === -1) || +(touchCount > 1);
+        const { isOrbit, isFly, isWalk, isFirstPerson, gamingControls, dt, distance, cameraComponent, mode, touchCount } = ctx;
+        const pan =
+            this._buttons[2] ||
+            +(button[2] === -1) ||
+            this._buttons[1] ||
+            +(button[1] === -1) ||
+            +(isOrbit && this._buttons[0] > 0 && this._shift > 0) ||
+            +(touchCount > 1);
 
         // auto-move cancellation and requestFirstPerson events (driven by keyboard axes)
         if (isWalk && (this._axis.x !== 0 || this._axis.z !== 0)) {

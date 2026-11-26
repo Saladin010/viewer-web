@@ -2,7 +2,15 @@ import { Asset, Entity } from 'playcanvas';
 import type { CreateViewerOptions } from '../options';
 import { defaultSettings } from '../schemas/defaults';
 import type { ViewerHandle } from '../types';
-import { applyCropBoundsToEntity, disposeRoomEntities, extractFilename, GLB_ENTITY_NAME, isGlbUrl, loadGlbEntity } from './glb-utils';
+import {
+    applyCropBoundsToEntity,
+    computeStudioOrbitPose,
+    disposeRoomEntities,
+    extractFilename,
+    GLB_ENTITY_NAME,
+    isGlbUrl,
+    loadGlbEntity
+} from './glb-utils';
 import { RealEstateHUD } from './hud';
 import { loadRealEstateBootstrap } from './loader';
 import type { PropertyPublicShareDto, RealEstateBootstrapResult } from './types';
@@ -30,14 +38,16 @@ export interface RealEstateViewerHandle {
 
 /**
  * Initializes the RealEstate3D experience with dual public/preview bootstrap,
- * Arabic RTL HUD, canonical .sog loading, indoor touch navigation, and WebGL2 fallback.
+ * clean 3D-first Arabic RTL HUD + Details modal, Studio-matched orbit navigation,
+ * 1-finger rotate / 2-finger pinch+pan mobile touch gestures, and WebGL2 fallback.
  */
 export async function initRealEstateViewer(
     createViewerFn: CreateViewerFn,
     options: RealEstateViewerOptions = {}
 ): Promise<RealEstateViewerHandle> {
     const container = options.container || document.body;
-    const currentUrl = options.url || (typeof window !== 'undefined' ? new URL(window.location.href) : new URL('http://localhost'));
+    const currentUrl =
+        options.url || (typeof window !== 'undefined' ? new URL(window.location.href) : new URL('http://localhost'));
 
     // 1. WebGL2 capability detection
     const isWebGL2Supported = checkWebGL2Support();
@@ -47,7 +57,7 @@ export async function initRealEstateViewer(
     const { property } = bootstrap;
     let activeSceneId = bootstrap.activeSceneId || property.sceneConfig?.defaultSceneId || property.scenes[0]?.sceneId;
 
-    let activeSceneModel = property.scenes.find((s) => s.sceneId === activeSceneId) || property.scenes[0];
+    const activeSceneModel = property.scenes.find((s) => s.sceneId === activeSceneId) || property.scenes[0];
     if (!activeSceneModel) {
         throw new Error('No 3D scenes found for this property.');
     }
@@ -57,26 +67,53 @@ export async function initRealEstateViewer(
     let currentGsplatEntity: Entity | null = null;
     let currentGsplatAsset: Asset | null = null;
 
+    const applyStudioOrbitForScene = (sceneId: string, targetEntity?: Entity | null, immediate = false) => {
+        if (!viewerHandle) return;
+        viewerHandle.state.gamingControls = false;
+        viewerHandle.state.animationPaused = true;
+        viewerHandle.state.cameraMode = 'orbit';
+
+        const sceneItem = property.sceneConfig?.scenes?.find((s) => s.sceneId === sceneId);
+        const saved = sceneItem?.defaultSpawnPose;
+        if (saved?.position?.length >= 3 && saved?.lookAt?.length >= 3) {
+            viewerHandle.events.fire('realestate:gotoPose', {
+                position: saved.position,
+                target: saved.lookAt,
+                fov: 50,
+                immediate
+            });
+            return;
+        }
+
+        const app = viewerHandle.app;
+        const glb = targetEntity ?? (app.root.findByName(GLB_ENTITY_NAME) as Entity | null);
+        const computed = computeStudioOrbitPose(glb);
+        if (computed) {
+            viewerHandle.events.fire('realestate:gotoPose', {
+                position: computed.position,
+                target: computed.target,
+                fov: computed.fov,
+                immediate
+            });
+        } else {
+            viewerHandle.frameScene();
+        }
+    };
+
     // Callbacks for HUD
     const callbacks = {
         onSelectRoom: async (roomId: string) => {
             await switchRoom(roomId);
         },
-        onToggleMode: (targetMode: 'walk' | 'orbit') => {
-            if (!viewerHandle) return;
-            if (targetMode === 'walk') {
-                viewerHandle.state.cameraMode = viewerHandle.state.walkAllowed ? 'walk' : 'fly';
-            } else {
-                viewerHandle.state.cameraMode = 'orbit';
-            }
-            hud.setMode(targetMode);
+        onResetCamera: () => {
+            applyStudioOrbitForScene(activeSceneId, null, false);
         },
         onHotspotClicked: async (targetSceneId: string, targetPose?: { position: number[]; lookAt: number[] }) => {
             await switchRoom(targetSceneId, targetPose);
         }
     };
 
-    // 3. Initialize HUD
+    // 3. Initialize clean 3D-first HUD
     const hud = new RealEstateHUD(container, property, activeSceneId, callbacks);
 
     // If WebGL2 is not supported, show fallback card immediately
@@ -92,7 +129,7 @@ export async function initRealEstateViewer(
         };
     }
 
-    // 4. Create PlayCanvas Viewer instance loading active room (.glb mesh or .sog splat)
+    // 4. Create PlayCanvas Viewer instance in pure Studio-matched Orbit mode (no built-in SuperSplat UI clutter)
     try {
         const initialFilename = extractFilename(
             activeSceneModel.signedModelUrl,
@@ -123,7 +160,7 @@ export async function initRealEstateViewer(
                             Number(initialSpawn.lookAt[1]) || 1.6,
                             Number(initialSpawn.lookAt[2]) || 0
                         ],
-                        fov: 55
+                        fov: 50
                     }
                 }
             ];
@@ -136,20 +173,21 @@ export async function initRealEstateViewer(
             contentUrl: activeSceneModel.signedModelUrl,
             contentFilename,
             renderer: 'webgl',
-            ui: true, // provide joystick & touch navigation layer
+            ui: false,
+            noanim: true,
             exposeGlobals: true
         });
 
-        // Re-mount HUD inside .sse-viewer so scoped styles apply properly
+        // Re-mount HUD inside .sse-viewer so canvas fills 100% cleanly behind it
         hud.attachToContainer(container);
 
-        // Enable gaming controls / touch joystick
-        viewerHandle.state.gamingControls = true;
+        // Lock mobile gestures to pure Orbit (1-finger rotate, 2-finger pinch zoom + 2-finger pan)
+        viewerHandle.state.gamingControls = false;
+        viewerHandle.state.animationPaused = true;
 
         const app = viewerHandle.app;
         const canvas = app.graphicsDevice.canvas as HTMLCanvasElement;
 
-        // Apply saved floorTilt & 6-DOF cropBounds once initial GLB entity finishes loading
         const applySceneTransforms = (entity: Entity | null, sceneId: string) => {
             if (!entity) return;
             const sceneItem = property.sceneConfig?.scenes?.find((s) => s.sceneId === sceneId);
@@ -164,14 +202,22 @@ export async function initRealEstateViewer(
             app.renderNextFrame = true;
         };
 
-        const applyInitialGlbWhenReady = () => {
+        let initialFramed = false;
+        const finalizeInitialRoom = () => {
             const glbEntity = app.root.findByName(GLB_ENTITY_NAME) as Entity | null;
             if (glbEntity) {
                 applySceneTransforms(glbEntity, activeSceneId);
             }
+            if (!initialFramed && (viewerHandle?.state.loaded || glbEntity)) {
+                initialFramed = true;
+                applyStudioOrbitForScene(activeSceneId, glbEntity, true);
+            }
         };
-        applyInitialGlbWhenReady();
-        viewerHandle.events.on('firstFrame', applyInitialGlbWhenReady);
+
+        viewerHandle.events.once('firstFrame', finalizeInitialRoom);
+        viewerHandle.events.on('loaded:changed', (loaded: boolean) => {
+            if (loaded) finalizeInitialRoom();
+        });
 
         // Context loss handling
         cleanupContextLoss = attachContextLossListeners(canvas, () => {
@@ -184,16 +230,12 @@ export async function initRealEstateViewer(
             hud.setCameraEntity(cameraEntity);
         }
 
-        // Apply initial spawn pose and eye height
-        applySceneSpawnPose(viewerHandle, property, activeSceneId);
-
         // Update 3D hotspot projection on each render frame
         app.on('update', () => {
             if (cameraEntity) {
                 hud.updateHotspotScreenPositions(cameraEntity);
             }
         });
-
     } catch (err: any) {
         console.error('[RealEstate3D] Error creating viewer:', err);
         hud.showFallbackCard('تعذر تشغيل المشهد ثلاثي الأبعاد: ' + (err?.message || 'خطأ غير معروف'));
@@ -240,9 +282,10 @@ export async function initRealEstateViewer(
                 applyCropBoundsToEntity(entity, sceneItem?.cropBounds ?? null);
             } else {
                 const rawName = extractFilename(nextModel.signedModelUrl, 'scene.sog');
-                const filename = rawName.toLowerCase().endsWith('.ply') || rawName.toLowerCase().endsWith('.sog')
-                    ? rawName
-                    : 'scene.sog';
+                const filename =
+                    rawName.toLowerCase().endsWith('.ply') || rawName.toLowerCase().endsWith('.sog')
+                        ? rawName
+                        : 'scene.sog';
                 const newAsset = new Asset(filename, 'gsplat', {
                     url: nextModel.signedModelUrl,
                     filename
@@ -267,17 +310,15 @@ export async function initRealEstateViewer(
                 });
             }
 
-            // Set camera pose
-            if (targetPose?.position) {
-                const camera = app.root.findByName('camera');
-                if (camera) {
-                    camera.setPosition(targetPose.position[0], targetPose.position[1], targetPose.position[2]);
-                    if (targetPose.lookAt) {
-                        camera.lookAt(targetPose.lookAt[0], targetPose.lookAt[1], targetPose.lookAt[2]);
-                    }
-                }
+            if (targetPose?.position?.length >= 3 && targetPose?.lookAt?.length >= 3) {
+                viewerHandle.events.fire('realestate:gotoPose', {
+                    position: targetPose.position,
+                    target: targetPose.lookAt,
+                    fov: 50,
+                    immediate: false
+                });
             } else {
-                applySceneSpawnPose(viewerHandle, property, roomId);
+                applyStudioOrbitForScene(roomId, currentGsplatEntity, false);
             }
 
             app.renderNextFrame = true;
@@ -286,32 +327,16 @@ export async function initRealEstateViewer(
         }
     }
 
-    function applySceneSpawnPose(handle: ViewerHandle, prop: PropertyPublicShareDto, sceneId: string) {
-        const sceneItem = prop.sceneConfig?.scenes?.find((s) => s.sceneId === sceneId);
-        const eyeHeight = prop.sceneConfig?.eyeHeightMeters || 1.6;
-        const app = handle.app;
-        const camera = app.root.findByName('camera');
-
-        if (sceneItem?.defaultSpawnPose?.position && camera) {
-            const pos = sceneItem.defaultSpawnPose.position;
-            const lookAt = sceneItem.defaultSpawnPose.lookAt;
-            // Ensure eye height ~1.6m
-            const y = pos[1] > 0 ? pos[1] : eyeHeight;
-            camera.setPosition(pos[0], y, pos[2]);
-            if (lookAt) {
-                camera.lookAt(lookAt[0], lookAt[1], lookAt[2]);
-            }
-        } else if (camera) {
-            camera.setPosition(0, eyeHeight, 0);
-        }
-    }
-
     const destroy = () => {
-        if (cleanupContextLoss) cleanupContextLoss();
-        hud.destroy();
+        if (cleanupContextLoss) {
+            cleanupContextLoss();
+            cleanupContextLoss = null;
+        }
         if (viewerHandle) {
             viewerHandle.destroy();
+            viewerHandle = null;
         }
+        hud.destroy();
     };
 
     return {

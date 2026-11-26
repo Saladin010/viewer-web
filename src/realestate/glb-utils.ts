@@ -1,5 +1,5 @@
 import type { AppBase, ContainerResource, RenderComponent, StandardMaterial } from 'playcanvas';
-import { Asset, Color, Entity, Plane, Vec3 } from 'playcanvas';
+import { Asset, BoundingBox, Color, Entity, Plane, Vec3 } from 'playcanvas';
 import type { CropBoundsDto } from './types';
 
 export const GLB_ENTITY_NAME = 'glbModel';
@@ -167,4 +167,42 @@ export const disposeRoomEntities = (app: AppBase): void => {
         }
         entity.destroy();
     }
+};
+
+/**
+ * Compute an external Studio-style orbit camera pose framing a loaded GLB mesh.
+ */
+export const computeStudioOrbitPose = (
+    rootEntity: Entity | null | undefined
+): { position: number[]; target: number[]; fov: number } | null => {
+    if (!rootEntity) return null;
+    const renders = rootEntity.findComponents('render') as RenderComponent[];
+    const bound = new BoundingBox();
+    let valid = false;
+    for (const render of renders) {
+        for (const mi of render.meshInstances) {
+            if (!mi.aabb) continue;
+            if (!valid) {
+                bound.copy(mi.aabb);
+                valid = true;
+            } else {
+                bound.add(mi.aabb);
+            }
+        }
+    }
+    if (!valid) return null;
+
+    const distance = Math.max(1.5, Math.min(50, bound.halfExtents.length() * 1.6));
+    const az = (35 * Math.PI) / 180;
+    const el = (-20 * Math.PI) / 180;
+    const cosEl = Math.cos(el);
+    return {
+        position: [
+            bound.center.x + distance * cosEl * Math.sin(az),
+            bound.center.y - distance * Math.sin(el),
+            bound.center.z + distance * cosEl * Math.cos(az)
+        ],
+        target: [bound.center.x, bound.center.y, bound.center.z],
+        fov: 50
+    };
 };

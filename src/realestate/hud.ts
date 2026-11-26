@@ -1,11 +1,21 @@
 import { Vec3 } from 'playcanvas';
-import type { HotspotDto, PropertyPublicShareDto, SceneItemDto } from './types';
+import type { PropertyPublicShareDto, SceneItemDto } from './types';
 
 export interface RealEstateHUDCallbacks {
     onSelectRoom: (roomId: string) => void;
-    onToggleMode: (targetMode: 'walk' | 'orbit') => void;
+    onResetCamera?: () => void;
     onHotspotClicked: (targetSceneId: string, targetPose?: { position: number[]; lookAt: number[] }) => void;
 }
+
+const escapeHtml = (value: unknown): string => {
+    const str = value == null ? '' : String(value);
+    return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+};
 
 export class RealEstateHUD {
     private container: HTMLElement;
@@ -13,9 +23,8 @@ export class RealEstateHUD {
     private activeSceneId: string;
     private callbacks: RealEstateHUDCallbacks;
     private rootElement: HTMLElement | null = null;
-    private currentMode: 'walk' | 'orbit' = 'walk';
     private hotspotElements: Map<string, HTMLElement> = new Map();
-    private cameraEntity: any = null;
+    private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
 
     constructor(
         container: HTMLElement,
@@ -30,8 +39,8 @@ export class RealEstateHUD {
         this.render();
     }
 
-    public setCameraEntity(camera: any) {
-        this.cameraEntity = camera;
+    public setCameraEntity(_camera: any) {
+        // Maintained for backwards compatibility with callers
     }
 
     public setActiveScene(sceneId: string) {
@@ -40,31 +49,16 @@ export class RealEstateHUD {
         this.renderHotspots();
     }
 
-    public setMode(mode: 'walk' | 'orbit') {
-        this.currentMode = mode;
-        const toggleBtn = this.rootElement?.querySelector('.re-mode-toggle-btn');
-        if (toggleBtn) {
-            const isDollhouse = this.property.dollhouseSupported;
-            if (isDollhouse) {
-                toggleBtn.textContent = mode === 'walk' ? 'منزل ثلاثي الأبعاد 🏠' : 'جولة افتراضية 🚶';
-            } else {
-                toggleBtn.textContent = mode === 'walk' ? 'مدار الغرفة 🔄' : 'جولة الغرفة 🚶';
-            }
-        }
-    }
-
     public updateHotspotScreenPositions(camera: any) {
         if (!camera?.camera) return;
         const scene = this.getCurrentSceneItem();
         if (!scene?.hotspots) return;
 
-        const screen = { x: 0, y: 0 };
         for (const hs of scene.hotspots) {
             const el = this.hotspotElements.get(hs.id);
             if (!el) continue;
 
             const pos = hs.position;
-            // PlayCanvas worldToScreen conversion
             const worldVec = new Vec3(pos[0], pos[1], pos[2]);
             const screenVec = camera.camera.worldToScreen(worldVec);
 
@@ -78,6 +72,14 @@ export class RealEstateHUD {
         }
     }
 
+    public toggleDetailsModal(open?: boolean) {
+        const modal = this.rootElement?.querySelector<HTMLElement>('.re-details-overlay');
+        if (!modal) return;
+        const nextOpen = open !== undefined ? open : !modal.classList.contains('is-open');
+        modal.classList.toggle('is-open', nextOpen);
+        modal.setAttribute('aria-hidden', nextOpen ? 'false' : 'true');
+    }
+
     public showFallbackCard(reason: string) {
         if (!this.rootElement) return;
         let fallback = this.rootElement.querySelector<HTMLElement>('.re-fallback-overlay');
@@ -89,28 +91,41 @@ export class RealEstateHUD {
 
         const thumb = this.property.thumbnailUrl || '';
         const phone = (this.property.officeContactPhone || '').replace(/[^0-9+]/g, '');
-        const waLink = `https://wa.me/${phone}?text=${encodeURIComponent(`السلام عليكم، استفسار بخصوص عقار: ${this.property.title}`)}`;
+        const waLink = phone
+            ? `https://wa.me/${phone}?text=${encodeURIComponent(`السلام عليكم، استفسار بخصوص عقار: ${this.property.title}`)}`
+            : '';
 
         fallback.innerHTML = `
             <div class="re-fallback-card" dir="rtl">
                 <div class="re-fallback-header">
-                    <h3>معاينة العقار (الوضع السريع)</h3>
-                    <p class="re-fallback-sub">${reason}</p>
+                    <h3>تعذر عرض المجسم ثلاثي الأبعاد</h3>
+                    <p class="re-fallback-sub">${escapeHtml(reason)}</p>
                 </div>
-                ${thumb ? `<img class="re-fallback-img" src="${thumb}" alt="${this.property.title}" />` : ''}
+                ${thumb ? `<img class="re-fallback-img" src="${escapeHtml(thumb)}" alt="${escapeHtml(this.property.title)}" />` : ''}
                 <div class="re-fallback-info">
-                    <h4>${this.property.title}</h4>
-                    <p><strong>المنطقة:</strong> ${this.property.district} - ${this.property.city}</p>
-                    <p><strong>السعر:</strong> ${this.property.price > 0 ? this.property.price.toLocaleString() + ' ' + this.property.currency : 'عند التواصل'}</p>
-                    <p><strong>المساحة:</strong> ${this.property.areaSqm} م² | <strong>الغرف:</strong> ${this.property.roomsCount} | <strong>الحمامات:</strong> ${this.property.bathroomsCount}</p>
+                    <h4>${escapeHtml(this.property.title)}</h4>
+                    <p><strong>المدينة:</strong> ${escapeHtml([this.property.city, this.property.district].filter(Boolean).join(' - ') || '—')}</p>
+                    <p><strong>السعر المطلوب:</strong> ${this.property.price > 0 ? `${escapeHtml(this.property.price.toLocaleString())} ${escapeHtml(this.property.currency || '')}` : 'عند التواصل'}</p>
+                    <p><strong>المساحة:</strong> ${this.property.areaSqm > 0 ? `${this.property.areaSqm} م²` : '—'} | <strong>الدور:</strong> ${this.formatFloor(this.property.floorNumber)}</p>
+                    <p><strong>الغرف:</strong> ${this.property.roomsCount || '—'} | <strong>الحمامات:</strong> ${this.property.bathroomsCount || '—'} | <strong>التشطيب:</strong> ${escapeHtml(this.property.finishingType || '—')}</p>
                 </div>
-                <div class="re-fallback-actions">
-                    <a class="re-whatsapp-btn" href="${waLink}" target="_blank" rel="noopener">
-                        <span>💬 تواصل مع المكتب عبر واتساب</span>
-                    </a>
-                </div>
+                ${
+                    waLink
+                        ? `<div class="re-fallback-actions">
+                               <a class="re-whatsapp-btn" href="${waLink}" target="_blank" rel="noopener">
+                                   <span>💬 تواصل مع المكتب عبر واتساب</span>
+                               </a>
+                           </div>`
+                        : ''
+                }
             </div>
         `;
+    }
+
+    private formatFloor(floor?: number): string {
+        if (floor === null || floor === undefined || Number.isNaN(floor)) return '—';
+        if (floor === 0) return 'الأرضي';
+        return String(floor);
     }
 
     private getCurrentSceneItem(): SceneItemDto | undefined {
@@ -143,7 +158,7 @@ export class RealEstateHUD {
             pin.setAttribute('data-target-scene', hs.targetSceneId);
             pin.innerHTML = `
                 <div class="re-hotspot-dot"></div>
-                <span class="re-hotspot-label">${hs.label}</span>
+                <span class="re-hotspot-label">${escapeHtml(hs.label)}</span>
             `;
 
             pin.addEventListener('click', (e) => {
@@ -162,66 +177,161 @@ export class RealEstateHUD {
         root.setAttribute('dir', 'rtl');
 
         const phone = (this.property.officeContactPhone || '').replace(/[^0-9+]/g, '');
-        const waText = encodeURIComponent(`السلام عليكم، أرغب بالاستفسار عن العقار: ${this.property.title} (${this.property.district})`);
-        const waUrl = `https://wa.me/${phone}?text=${waText}`;
+        const waText = encodeURIComponent(
+            `السلام عليكم، أرغب بالاستفسار عن العقار: ${this.property.title}${this.property.city ? ` (${this.property.city})` : ''}`
+        );
+        const waUrl = phone ? `https://wa.me/${phone}?text=${waText}` : '';
 
-        const isDollhouse = this.property.dollhouseSupported;
-        const modeLabel = isDollhouse
-            ? (this.currentMode === 'walk' ? 'منزل ثلاثي الأبعاد 🏠' : 'جولة افتراضية 🚶')
-            : (this.currentMode === 'walk' ? 'مدار الغرفة 🔄' : 'جولة الغرفة 🚶');
+        const priceText =
+            this.property.price > 0
+                ? `${this.property.price.toLocaleString()} ${this.property.currency || ''}`.trim()
+                : 'عند التواصل';
+        const areaText = this.property.areaSqm > 0 ? `${this.property.areaSqm} م²` : '—';
+        const cityText = [this.property.city, this.property.district].filter(Boolean).join(' - ') || '—';
+        const floorText = this.formatFloor(this.property.floorNumber);
+        const roomsText = this.property.roomsCount > 0 ? String(this.property.roomsCount) : '—';
+        const bathsText = this.property.bathroomsCount > 0 ? String(this.property.bathroomsCount) : '—';
+        const finishingText = this.property.finishingType || '—';
 
         root.innerHTML = `
-            <!-- Top Property Specs Header -->
-            <header class="re-top-header">
-                <div class="re-header-main">
-                    <h1 class="re-prop-title">${this.property.title}</h1>
-                    <div class="re-prop-meta">
-                        <span class="re-badge re-location">${this.property.district} - ${this.property.city}</span>
-                        ${this.property.price > 0 ? `<span class="re-badge re-price">${this.property.price.toLocaleString()} ${this.property.currency}</span>` : ''}
-                        ${this.property.areaSqm > 0 ? `<span class="re-badge">${this.property.areaSqm} م²</span>` : ''}
-                        ${this.property.roomsCount > 0 ? `<span class="re-badge">${this.property.roomsCount} غرف</span>` : ''}
-                        ${this.property.bathroomsCount > 0 ? `<span class="re-badge">${this.property.bathroomsCount} حمام</span>` : ''}
-                    </div>
-                </div>
-                <div class="re-header-actions">
-                    <a class="re-whatsapp-btn" href="${waUrl}" target="_blank" rel="noopener noreferrer">
-                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-                            <path d="M12.04 2c-5.46 0-9.91 4.45-9.91 9.91 0 1.75.46 3.45 1.32 4.95L2.05 22l5.25-1.38c1.45.79 3.08 1.21 4.74 1.21 5.46 0 9.91-4.45 9.91-9.91 0-5.46-4.45-9.92-9.91-9.92zM12.04 20.14c-1.48 0-2.93-.4-4.2-1.15l-.3-.18-3.12.82.83-3.04-.2-.31c-.82-1.31-1.26-2.83-1.26-4.38 0-4.54 3.7-8.24 8.24-8.24 4.54 0 8.24 3.7 8.24 8.24s-3.7 8.24-8.24 8.24zm4.52-6.17c-.25-.12-1.47-.72-1.7-.81-.23-.08-.39-.12-.56.12-.17.25-.64.81-.79.97-.14.17-.29.19-.54.06-.25-.12-1.05-.39-2-1.23-.74-.66-1.24-1.47-1.39-1.72-.14-.25-.02-.38.11-.5.11-.11.25-.29.37-.43.12-.14.17-.25.25-.41.08-.17.04-.31-.02-.43s-.56-1.34-.76-1.84c-.2-.48-.41-.42-.56-.43h-.48c-.17 0-.43.06-.66.31-.23.25-.87.85-.87 2.07s.89 2.4 1.01 2.57c.12.17 1.75 2.67 4.24 3.74.59.26 1.05.41 1.41.53.6.19 1.14.16 1.57.1.48-.07 1.47-.6 1.68-1.18.21-.58.21-1.07.14-1.18-.06-.11-.22-.17-.46-.3z"/>
-                        </svg>
-                        <span>تواصل واتساب</span>
-                    </a>
-                    <button class="re-mode-toggle-btn" type="button">
-                        ${modeLabel}
-                    </button>
-                </div>
-            </header>
+            <!-- Minimal Corner Controls (keep 3D model completely unobstructed) -->
+            <div class="re-top-bar">
+                <button class="re-pill-btn re-details-btn" type="button" aria-label="عرض تفاصيل العقار">
+                    <span class="re-btn-icon">ℹ</span>
+                    <span>تفاصيل</span>
+                </button>
+                <button class="re-pill-btn re-reset-btn" type="button" title="إعادة ضبط الكاميرا" aria-label="إعادة ضبط الكاميرا">
+                    <span>⌖ إعادة ضبط</span>
+                </button>
+            </div>
 
+            <!-- Interactive Room Transition Hotspots -->
             <div class="re-hotspots-layer"></div>
 
-            <nav class="re-bottom-pills-bar">
+            <!-- Compact Bottom Room Switcher -->
+            <nav class="re-bottom-pills-bar" aria-label="غرف العقار">
                 <div class="re-pills-scroll">
-                    ${this.property.scenes.map((s) => `
-                        <button class="re-room-pill ${s.sceneId === this.activeSceneId ? 'active' : ''}" 
-                                data-room-id="${s.sceneId}" 
+                    ${this.property.scenes
+                        .map(
+                            (s) => `
+                        <button class="re-room-pill ${s.sceneId === this.activeSceneId ? 'active' : ''}"
+                                data-room-id="${escapeHtml(s.sceneId)}"
                                 type="button">
-                            ${s.label}
+                            ${escapeHtml(s.label)}
                         </button>
-                    `).join('')}
+                    `
+                        )
+                        .join('')}
                 </div>
             </nav>
+
+            <!-- Details Drawer / Modal (hidden until user clicks "تفاصيل") -->
+            <div class="re-details-overlay" aria-hidden="true">
+                <div class="re-details-card" role="dialog" aria-modal="true" aria-label="تفاصيل العقار">
+                    <div class="re-details-top">
+                        <div>
+                            <span class="re-details-eyebrow">${escapeHtml(this.property.listingType || 'تفاصيل العقار')}</span>
+                            <h2 class="re-details-title">${escapeHtml(this.property.title)}</h2>
+                        </div>
+                        <button class="re-back-btn" type="button">
+                            <span>← رجوع للمجسم</span>
+                        </button>
+                    </div>
+
+                    <div class="re-details-grid">
+                        <div class="re-detail-item re-detail-highlight">
+                            <span class="re-detail-label">السعر المطلوب</span>
+                            <strong class="re-detail-val">${escapeHtml(priceText)}</strong>
+                        </div>
+                        <div class="re-detail-item">
+                            <span class="re-detail-label">المساحة</span>
+                            <strong class="re-detail-val">${escapeHtml(areaText)}</strong>
+                        </div>
+                        <div class="re-detail-item">
+                            <span class="re-detail-label">المدينة</span>
+                            <strong class="re-detail-val">${escapeHtml(cityText)}</strong>
+                        </div>
+                        <div class="re-detail-item">
+                            <span class="re-detail-label">الدور</span>
+                            <strong class="re-detail-val">${escapeHtml(floorText)}</strong>
+                        </div>
+                        <div class="re-detail-item">
+                            <span class="re-detail-label">عدد الغرف</span>
+                            <strong class="re-detail-val">${escapeHtml(roomsText)}</strong>
+                        </div>
+                        <div class="re-detail-item">
+                            <span class="re-detail-label">عدد الحمامات</span>
+                            <strong class="re-detail-val">${escapeHtml(bathsText)}</strong>
+                        </div>
+                        <div class="re-detail-item re-detail-wide">
+                            <span class="re-detail-label">التشطيب</span>
+                            <strong class="re-detail-val">${escapeHtml(finishingText)}</strong>
+                        </div>
+                    </div>
+
+                    ${
+                        this.property.publicDescription
+                            ? `<div class="re-details-desc">${escapeHtml(this.property.publicDescription)}</div>`
+                            : ''
+                    }
+
+                    <div class="re-details-footer">
+                        <button class="re-back-primary-btn" type="button">رجوع للمجسم ثلاثي الأبعاد</button>
+                        ${
+                            waUrl
+                                ? `<a class="re-whatsapp-btn" href="${waUrl}" target="_blank" rel="noopener noreferrer">
+                                       <span>💬 تواصل واتساب${this.property.officeContactName ? ` (${escapeHtml(this.property.officeContactName)})` : ''}</span>
+                                   </a>`
+                                : ''
+                        }
+                    </div>
+                </div>
+            </div>
         `;
 
-        // Attach event listeners
-        const toggleBtn = root.querySelector('.re-mode-toggle-btn');
-        toggleBtn?.addEventListener('click', () => {
-            const nextMode = this.currentMode === 'walk' ? 'orbit' : 'walk';
-            this.setMode(nextMode);
-            this.callbacks.onToggleMode(nextMode);
+        // Details open/close handlers
+        const detailsBtn = root.querySelector('.re-details-btn');
+        const detailsOverlay = root.querySelector<HTMLElement>('.re-details-overlay');
+        const backBtn = root.querySelector('.re-back-btn');
+        const backPrimaryBtn = root.querySelector('.re-back-primary-btn');
+        const resetBtn = root.querySelector('.re-reset-btn');
+
+        detailsBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.toggleDetailsModal(true);
+        });
+        backBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.toggleDetailsModal(false);
+        });
+        backPrimaryBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.toggleDetailsModal(false);
+        });
+        detailsOverlay?.addEventListener('click', (e) => {
+            if (e.target === detailsOverlay) {
+                this.toggleDetailsModal(false);
+            }
+        });
+        resetBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.callbacks.onResetCamera?.();
         });
 
+        this.keydownHandler = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                this.toggleDetailsModal(false);
+            }
+        };
+        if (typeof window !== 'undefined') {
+            window.addEventListener('keydown', this.keydownHandler);
+        }
+
+        // Room switching pills
         const pills = root.querySelectorAll('.re-room-pill');
         pills.forEach((p) => {
-            p.addEventListener('click', () => {
+            p.addEventListener('click', (e) => {
+                e.stopPropagation();
                 const rid = p.getAttribute('data-room-id');
                 if (rid && rid !== this.activeSceneId) {
                     this.setActiveScene(rid);
@@ -232,7 +342,7 @@ export class RealEstateHUD {
 
         const mount = this.container.classList.contains('sse-viewer')
             ? this.container
-            : (this.container.querySelector('.sse-viewer') || this.container);
+            : this.container.querySelector('.sse-viewer') || this.container;
         mount.appendChild(root);
         this.rootElement = root;
         this.renderHotspots();
@@ -242,17 +352,21 @@ export class RealEstateHUD {
         if (!this.rootElement) return;
         const mount = container.classList.contains('sse-viewer')
             ? container
-            : (container.querySelector('.sse-viewer') || container);
+            : container.querySelector('.sse-viewer') || container;
         if (this.rootElement.parentElement !== mount) {
             mount.appendChild(this.rootElement);
         }
     }
 
     public destroy() {
-        if (this.rootElement && this.rootElement.parentNode) {
-            this.rootElement.parentNode.removeChild(this.rootElement);
+        if (this.keydownHandler && typeof window !== 'undefined') {
+            window.removeEventListener('keydown', this.keydownHandler);
+            this.keydownHandler = null;
+        }
+        if (this.rootElement && this.rootElement.parentElement) {
+            this.rootElement.parentElement.removeChild(this.rootElement);
+            this.rootElement = null;
         }
         this.hotspotElements.clear();
-        this.rootElement = null;
     }
 }
