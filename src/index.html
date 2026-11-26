@@ -148,7 +148,7 @@
 <body>
     <!-- Application Script -->
     <script type="module">
-        import { createViewer } from './index.js';
+        import { createViewer, initRealEstateViewer } from './index.js';
 
         const { options, settings, hasContent } = window.sse;
         const pageUrl = new URL(location.href);
@@ -163,7 +163,6 @@
             createViewer({ container: document.body, settings, ...options });
         } else if (token || previewScanId) {
             try {
-                const { initRealEstateViewer } = await import('./realestate.js');
                 await initRealEstateViewer(createViewer, { container: document.body, url: pageUrl });
             } catch (err) {
                 console.error('Failed to load RealEstate viewer:', err);
