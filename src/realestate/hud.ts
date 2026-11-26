@@ -90,10 +90,6 @@ export class RealEstateHUD {
         }
 
         const thumb = this.property.thumbnailUrl || '';
-        const phone = (this.property.officeContactPhone || '').replace(/[^0-9+]/g, '');
-        const waLink = phone
-            ? `https://wa.me/${phone}?text=${encodeURIComponent(`السلام عليكم، استفسار بخصوص عقار: ${this.property.title}`)}`
-            : '';
 
         fallback.innerHTML = `
             <div class="re-fallback-card" dir="rtl">
@@ -109,15 +105,6 @@ export class RealEstateHUD {
                     <p><strong>المساحة:</strong> ${this.property.areaSqm > 0 ? `${this.property.areaSqm} م²` : '—'} | <strong>الدور:</strong> ${this.formatFloor(this.property.floorNumber)}</p>
                     <p><strong>الغرف:</strong> ${this.property.roomsCount || '—'} | <strong>الحمامات:</strong> ${this.property.bathroomsCount || '—'} | <strong>التشطيب:</strong> ${escapeHtml(this.property.finishingType || '—')}</p>
                 </div>
-                ${
-                    waLink
-                        ? `<div class="re-fallback-actions">
-                               <a class="re-whatsapp-btn" href="${waLink}" target="_blank" rel="noopener">
-                                   <span>💬 تواصل مع المكتب عبر واتساب</span>
-                               </a>
-                           </div>`
-                        : ''
-                }
             </div>
         `;
     }
@@ -175,12 +162,6 @@ export class RealEstateHUD {
         const root = document.createElement('div');
         root.className = 're-hud-container';
         root.setAttribute('dir', 'rtl');
-
-        const phone = (this.property.officeContactPhone || '').replace(/[^0-9+]/g, '');
-        const waText = encodeURIComponent(
-            `السلام عليكم، أرغب بالاستفسار عن العقار: ${this.property.title}${this.property.city ? ` (${this.property.city})` : ''}`
-        );
-        const waUrl = phone ? `https://wa.me/${phone}?text=${waText}` : '';
 
         const priceText =
             this.property.price > 0
@@ -277,13 +258,6 @@ export class RealEstateHUD {
 
                     <div class="re-details-footer">
                         <button class="re-back-primary-btn" type="button">رجوع للمجسم ثلاثي الأبعاد</button>
-                        ${
-                            waUrl
-                                ? `<a class="re-whatsapp-btn" href="${waUrl}" target="_blank" rel="noopener noreferrer">
-                                       <span>💬 تواصل واتساب${this.property.officeContactName ? ` (${escapeHtml(this.property.officeContactName)})` : ''}</span>
-                                   </a>`
-                                : ''
-                        }
                     </div>
                 </div>
             </div>
