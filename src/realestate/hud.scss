@@ -1,21 +1,26 @@
-.sse-viewer {
-    .re-hud-container {
-        position: absolute;
-        inset: 0;
-        pointer-events: none;
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Cairo", "Noto Sans Arabic", sans-serif;
-        color: #ffffff;
-        z-index: 10;
-        user-select: none;
-        -webkit-user-select: none;
+.re-hud-container {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Cairo", "Noto Sans Arabic", sans-serif;
+    color: #ffffff;
+    z-index: 20;
+    user-select: none;
+    -webkit-user-select: none;
 
-        * {
-            box-sizing: border-box;
-        }
+    * {
+        box-sizing: border-box;
     }
+}
+
+.sse-viewer > .re-hud-container {
+    position: absolute;
+}
+
+.re-hud-container {
 
     .re-top-header {
         pointer-events: auto;

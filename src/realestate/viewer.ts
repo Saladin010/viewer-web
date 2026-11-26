@@ -1,5 +1,6 @@
 import { Asset, Entity } from 'playcanvas';
 import type { CreateViewerOptions } from '../options';
+import { defaultSettings } from '../schemas/defaults';
 import type { ViewerHandle } from '../types';
 import { applyCropBoundsToEntity, disposeRoomEntities, extractFilename, GLB_ENTITY_NAME, isGlbUrl, loadGlbEntity } from './glb-utils';
 import { RealEstateHUD } from './hud';
@@ -107,18 +108,26 @@ export async function initRealEstateViewer(
 
         const initialSceneItem = property.sceneConfig?.scenes?.find((s) => s.sceneId === activeSceneId);
         const initialSpawn = initialSceneItem?.defaultSpawnPose;
-        const viewerSettings: Record<string, any> = {};
+        const viewerSettings = defaultSettings('environment');
         if (initialSpawn?.position?.length >= 3 && initialSpawn?.lookAt?.length >= 3) {
             viewerSettings.cameras = [
                 {
                     initial: {
-                        position: initialSpawn.position,
-                        target: initialSpawn.lookAt,
-                        fov: 50
+                        position: [
+                            Number(initialSpawn.position[0]) || 0,
+                            Number(initialSpawn.position[1]) || 1.6,
+                            Number(initialSpawn.position[2]) || 0
+                        ],
+                        target: [
+                            Number(initialSpawn.lookAt[0]) || 0,
+                            Number(initialSpawn.lookAt[1]) || 1.6,
+                            Number(initialSpawn.lookAt[2]) || 0
+                        ],
+                        fov: 55
                     }
                 }
             ];
-            viewerSettings.startMode = 'none';
+            viewerSettings.startMode = 'default';
         }
 
         viewerHandle = await createViewerFn({
