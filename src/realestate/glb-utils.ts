@@ -1,7 +1,50 @@
 import type { AppBase, ContainerResource, RenderComponent, StandardMaterial } from 'playcanvas';
-import { Asset, Color, Entity } from 'playcanvas';
+import { Asset, Color, Entity, Plane, Vec3 } from 'playcanvas';
+import type { CropBoundsDto } from './types';
 
 export const GLB_ENTITY_NAME = 'glbModel';
+
+/**
+ * Apply 6-DOF axis-aligned clipping planes to every MeshInstance under rootEntity
+ * using PlayCanvas's native MeshInstance#clippingPlanes (works in WebGL2 & WebGPU).
+ */
+export const applyCropBoundsToEntity = (
+    rootEntity: Entity | null | undefined,
+    bounds?: CropBoundsDto | number[] | null
+): void => {
+    if (!rootEntity) return;
+
+    let planes: Plane[] = [];
+    if (Array.isArray(bounds) && bounds.length === 6 && bounds.every((n) => Number.isFinite(n))) {
+        const [minX, maxX, minY, maxY, minZ, maxZ] = bounds;
+        planes = [
+            new Plane().setFromPointNormal(new Vec3(minX, 0, 0), new Vec3(1, 0, 0)),
+            new Plane().setFromPointNormal(new Vec3(maxX, 0, 0), new Vec3(-1, 0, 0)),
+            new Plane().setFromPointNormal(new Vec3(0, minY, 0), new Vec3(0, 1, 0)),
+            new Plane().setFromPointNormal(new Vec3(0, maxY, 0), new Vec3(0, -1, 0)),
+            new Plane().setFromPointNormal(new Vec3(0, 0, minZ), new Vec3(0, 0, 1)),
+            new Plane().setFromPointNormal(new Vec3(0, 0, maxZ), new Vec3(0, 0, -1))
+        ];
+    } else if (bounds && !Array.isArray(bounds) && bounds.min?.length === 3 && bounds.max?.length === 3) {
+        const [minX, minY, minZ] = bounds.min;
+        const [maxX, maxY, maxZ] = bounds.max;
+        planes = [
+            new Plane().setFromPointNormal(new Vec3(minX, 0, 0), new Vec3(1, 0, 0)),
+            new Plane().setFromPointNormal(new Vec3(maxX, 0, 0), new Vec3(-1, 0, 0)),
+            new Plane().setFromPointNormal(new Vec3(0, minY, 0), new Vec3(0, 1, 0)),
+            new Plane().setFromPointNormal(new Vec3(0, maxY, 0), new Vec3(0, -1, 0)),
+            new Plane().setFromPointNormal(new Vec3(0, 0, minZ), new Vec3(0, 0, 1)),
+            new Plane().setFromPointNormal(new Vec3(0, 0, maxZ), new Vec3(0, 0, -1))
+        ];
+    }
+
+    const renders = rootEntity.findComponents('render') as RenderComponent[];
+    for (const render of renders) {
+        for (const mi of render.meshInstances) {
+            mi.clippingPlanes = planes;
+        }
+    }
+};
 
 export const isGlbUrl = (url: string): boolean => {
     try {

@@ -61,7 +61,7 @@ function htmlPlugin() {
             // formatting shifts, shipping an empty base href to BASE_HREF deploys.
             const transformed = contents.replace(
                 /<base\b[^>]*>/,
-                () => `<base href="${process.env.BASE_HREF ?? ''}" />`
+                () => `<base href="${process.env.BASE_HREF ?? '/'}" />`
             );
             this.emitFile({
                 type: 'asset',

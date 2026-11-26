@@ -1,4 +1,107 @@
-import type { PropertyPublicShareDto, RealEstateBootstrapResult, ScanPreviewDto } from './types';
+import type {
+    CameraPoseDto,
+    CropBoundsDto,
+    HotspotDto,
+    PropertyPublicShareDto,
+    RealEstateBootstrapResult,
+    ScanPreviewDto,
+    SceneConfigurationDto,
+    SceneItemDto,
+    SceneModelDto
+} from './types';
+
+function inferModelFormat(url: string): string {
+    const clean = (url || '').split(/[?#]/)[0].toLowerCase();
+    if (clean.endsWith('.glb')) return 'glb';
+    if (clean.endsWith('.ply')) return 'ply';
+    return 'sog';
+}
+
+function normalizeRoomsToScenes(rawRooms: any[]): SceneModelDto[] {
+    if (!Array.isArray(rawRooms)) return [];
+    return rawRooms
+        .filter((r) => Boolean(r?.signedModelUrl || r?.modelUrl))
+        .sort((a, b) => (a?.sortOrder ?? 0) - (b?.sortOrder ?? 0))
+        .map((r) => {
+            const url = r.signedModelUrl || r.modelUrl || '';
+            return {
+                sceneId: r.sceneId || r.roomId || '',
+                label: r.label || r.roomLabel || r.roomId || 'غرفة',
+                signedModelUrl: url,
+                format: r.format || inferModelFormat(url),
+                sizeBytes: r.sizeBytes ?? undefined
+            };
+        });
+}
+
+function normalizeSceneConfig(rawConfig: any, fallbackScenes: SceneModelDto[]): SceneConfigurationDto {
+    const rawItems: any[] = Array.isArray(rawConfig?.scenes) ? rawConfig.scenes : [];
+    const scenes: SceneItemDto[] = rawItems.map((item) => {
+        const sceneId = item.sceneId || item.roomId || '';
+        const label = item.label || item.roomLabel || sceneId;
+
+        let defaultSpawnPose: CameraPoseDto | undefined = item.defaultSpawnPose;
+        if (!defaultSpawnPose && Array.isArray(item.cameraPosition) && item.cameraPosition.length >= 3) {
+            defaultSpawnPose = {
+                position: item.cameraPosition.slice(0, 3),
+                lookAt: Array.isArray(item.cameraTarget) && item.cameraTarget.length >= 3
+                    ? item.cameraTarget.slice(0, 3)
+                    : [0, item.cameraPosition[1] ?? 1.6, 0]
+            };
+        }
+
+        let cropBounds: CropBoundsDto | undefined = item.cropBounds;
+        let floorEulerDeg: number[] | undefined = item.floorEulerDeg;
+        let hotspots: HotspotDto[] = [];
+
+        if (Array.isArray(item.hotspots)) {
+            hotspots = item.hotspots.map((hs: any) => ({
+                id: hs.id || `hs_${Math.random().toString(36).slice(2, 8)}`,
+                label: hs.label || hs.title || 'انتقال',
+                position: Array.isArray(hs.position) ? hs.position : [0, 1.5, 0],
+                targetSceneId: hs.targetSceneId || hs.targetRoomId || '',
+                targetPose: hs.targetPose
+            }));
+        } else if (item.hotspots && typeof item.hotspots === 'object') {
+            const hsObj = item.hotspots;
+            if (!cropBounds && Array.isArray(hsObj.cropBounds) && hsObj.cropBounds.length === 6) {
+                cropBounds = {
+                    min: [hsObj.cropBounds[0], hsObj.cropBounds[2], hsObj.cropBounds[4]],
+                    max: [hsObj.cropBounds[1], hsObj.cropBounds[3], hsObj.cropBounds[5]]
+                };
+            }
+            if (!floorEulerDeg && typeof hsObj.floorTiltDegrees === 'number' && hsObj.floorTiltDegrees !== 0) {
+                floorEulerDeg = [hsObj.floorTiltDegrees, 0, 0];
+            }
+            if (Array.isArray(hsObj.links)) {
+                hotspots = hsObj.links.map((hs: any) => ({
+                    id: hs.id || `hs_${Math.random().toString(36).slice(2, 8)}`,
+                    label: hs.label || hs.title || 'انتقال',
+                    position: Array.isArray(hs.position) ? hs.position : [0, 1.5, 0],
+                    targetSceneId: hs.targetSceneId || hs.targetRoomId || '',
+                    targetPose: hs.targetPose
+                }));
+            }
+        }
+
+        return {
+            sceneId,
+            label,
+            scaleFactor: item.scaleFactor,
+            floorEulerDeg,
+            cropBounds,
+            defaultSpawnPose,
+            hotspots
+        };
+    });
+
+    return {
+        expectedVersion: rawConfig?.expectedVersion ?? rawConfig?.version,
+        defaultSceneId: rawConfig?.defaultSceneId || fallbackScenes[0]?.sceneId || '',
+        eyeHeightMeters: rawConfig?.eyeHeightMeters ?? 1.6,
+        scenes
+    };
+}
 
 export function resolveApiBaseUrl(url: URL): string {
     const fromQuery = url.searchParams.get('apiBaseUrl') || url.searchParams.get('api');
@@ -87,7 +190,17 @@ export async function fetchPublicShare(token: string, apiBaseUrl: string): Promi
         throw new Error(`Failed to load public share (HTTP ${response.status}): ${response.statusText}`);
     }
 
-    const data = (await response.json()) as PropertyPublicShareDto;
+    const raw = (await response.json()) as any;
+    const scenes = Array.isArray(raw.scenes) && raw.scenes.length > 0
+        ? normalizeRoomsToScenes(raw.scenes)
+        : normalizeRoomsToScenes(raw.rooms || []);
+    const sceneConfig = normalizeSceneConfig(raw.sceneConfig, scenes);
+
+    const data: PropertyPublicShareDto = {
+        ...raw,
+        scenes,
+        sceneConfig
+    };
 
     // Fire-and-forget view count analytics beacon per Section 3.2 (M2)
     const beaconUrl = `${apiBaseUrl}/api/v1/public/share/${token}/view`;
@@ -123,7 +236,11 @@ export async function fetchAuthenticatedPreview(
         throw new Error(`Failed to load scan preview (HTTP ${response.status}): ${response.statusText}`);
     }
 
-    const preview = (await response.json()) as ScanPreviewDto;
+    const preview = (await response.json()) as any;
+    const scenes = Array.isArray(preview.scenes) && preview.scenes.length > 0
+        ? normalizeRoomsToScenes(preview.scenes)
+        : normalizeRoomsToScenes(preview.rooms || []);
+    const sceneConfig = normalizeSceneConfig(preview.sceneConfig, scenes);
 
     // Adapt to uniform PropertyPublicShareDto representation
     return {
@@ -137,7 +254,7 @@ export async function fetchAuthenticatedPreview(
         currency: 'EGP',
         areaSqm: 0,
         floorNumber: 0,
-        roomsCount: preview.scenes.length,
+        roomsCount: scenes.length,
         bathroomsCount: 1,
         finishingType: 'جاهز للمعاينة',
         publicDescription: 'معاينة داخلية قبل النشر',
@@ -145,9 +262,9 @@ export async function fetchAuthenticatedPreview(
         officeContactPhone: preview.officeContactPhone || '+201000000000',
         captureMode: preview.captureMode || 'RoomByRoom',
         dollhouseSupported: preview.dollhouseSupported ?? false,
-        scenes: preview.scenes || [],
+        scenes,
         thumbnailUrl: preview.thumbnailUrl,
-        sceneConfig: preview.sceneConfig
+        sceneConfig
     };
 }
 

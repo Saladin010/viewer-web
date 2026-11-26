@@ -142,6 +142,76 @@ describe('RealEstate3D Dual Bootstrap Loader', () => {
             assert.ok(beaconCall);
             assert.strictEqual(beaconCall.opts.method, 'POST');
         });
+
+        it('normalizes live backend rooms, modelUrl, cameraPosition, and cropBounds payload', async () => {
+            const liveBackendShare = {
+                propertyId: 'p-live',
+                title: 'شقة حية',
+                district: 'المعادي',
+                city: 'القاهرة',
+                listingType: 'Rent',
+                price: 15000,
+                currency: 'EGP',
+                areaSqm: 120,
+                floorNumber: 4,
+                roomsCount: 2,
+                bathroomsCount: 1,
+                finishingType: 'SuperLux',
+                officeContactName: 'مكتب المعادي',
+                officeContactPhone: '+201000000000',
+                dollhouseSupported: false,
+                rooms: [
+                    {
+                        roomId: '1room',
+                        roomLabel: 'الغرفه الاولي',
+                        sortOrder: 0,
+                        modelUrl: 'https://r2.example.com/models/room1.glb',
+                        gaussianCount: 388780
+                    }
+                ],
+                sceneConfig: {
+                    scanJobId: 'scan-live',
+                    version: 1,
+                    defaultSceneId: '1room',
+                    eyeHeightMeters: 1.6,
+                    scenes: [
+                        {
+                            roomId: '1room',
+                            roomLabel: 'الغرفه الاولي',
+                            sortOrder: 0,
+                            cameraPosition: [-2, 2.4, -5],
+                            cameraTarget: [0.1, 1.6, 0.7],
+                            hotspots: {
+                                cropBounds: [-6, 8, -4, 4, -9, 9],
+                                floorTiltDegrees: -1.5,
+                                links: []
+                            }
+                        }
+                    ]
+                }
+            };
+
+            global.fetch = mock.fn(async (url) => {
+                if (url.includes('/view')) return { ok: true, status: 204 };
+                return { ok: true, status: 200, json: async () => liveBackendShare };
+            });
+
+            const data = await fetchPublicShare('tok_live', 'https://api.test');
+            assert.strictEqual(data.scenes.length, 1);
+            assert.strictEqual(data.scenes[0].sceneId, '1room');
+            assert.strictEqual(data.scenes[0].signedModelUrl, 'https://r2.example.com/models/room1.glb');
+            assert.strictEqual(data.scenes[0].format, 'glb');
+            assert.deepStrictEqual(data.sceneConfig.scenes[0].defaultSpawnPose, {
+                position: [-2, 2.4, -5],
+                lookAt: [0.1, 1.6, 0.7]
+            });
+            assert.deepStrictEqual(data.sceneConfig.scenes[0].cropBounds, {
+                min: [-6, -4, -9],
+                max: [8, 4, 9]
+            });
+            assert.deepStrictEqual(data.sceneConfig.scenes[0].floorEulerDeg, [-1.5, 0, 0]);
+            assert.deepStrictEqual(data.sceneConfig.scenes[0].hotspots, []);
+        });
     });
 
     describe('Authenticated Preview Mode', () => {

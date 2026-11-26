@@ -1,10 +1,10 @@
 import { Asset, Entity } from 'playcanvas';
 import type { CreateViewerOptions } from '../options';
 import type { ViewerHandle } from '../types';
-import { disposeRoomEntities, extractFilename, isGlbUrl, loadGlbEntity } from './glb-utils';
+import { applyCropBoundsToEntity, disposeRoomEntities, extractFilename, GLB_ENTITY_NAME, isGlbUrl, loadGlbEntity } from './glb-utils';
 import { RealEstateHUD } from './hud';
 import { loadRealEstateBootstrap } from './loader';
-import type { PropertyPublicShareDto, RealEstateBootstrapResult, SceneItemDto, SceneModelDto } from './types';
+import type { PropertyPublicShareDto, RealEstateBootstrapResult } from './types';
 import { attachContextLossListeners, checkWebGL2Support } from './webgl';
 
 export type CreateViewerFn = (options: CreateViewerOptions) => Promise<ViewerHandle>;
@@ -64,7 +64,7 @@ export async function initRealEstateViewer(
         onToggleMode: (targetMode: 'walk' | 'orbit') => {
             if (!viewerHandle) return;
             if (targetMode === 'walk') {
-                viewerHandle.state.cameraMode = 'walk';
+                viewerHandle.state.cameraMode = viewerHandle.state.walkAllowed ? 'walk' : 'fly';
             } else {
                 viewerHandle.state.cameraMode = 'orbit';
             }
@@ -105,9 +105,25 @@ export async function initRealEstateViewer(
                     ? 'scene.glb'
                     : 'scene.sog';
 
+        const initialSceneItem = property.sceneConfig?.scenes?.find((s) => s.sceneId === activeSceneId);
+        const initialSpawn = initialSceneItem?.defaultSpawnPose;
+        const viewerSettings: Record<string, any> = {};
+        if (initialSpawn?.position?.length >= 3 && initialSpawn?.lookAt?.length >= 3) {
+            viewerSettings.cameras = [
+                {
+                    initial: {
+                        position: initialSpawn.position,
+                        target: initialSpawn.lookAt,
+                        fov: 50
+                    }
+                }
+            ];
+            viewerSettings.startMode = 'none';
+        }
+
         viewerHandle = await createViewerFn({
             container,
-            settings: {},
+            settings: viewerSettings,
             contentUrl: activeSceneModel.signedModelUrl,
             contentFilename,
             renderer: 'webgl',
@@ -115,11 +131,38 @@ export async function initRealEstateViewer(
             exposeGlobals: true
         });
 
+        // Re-mount HUD inside .sse-viewer so scoped styles apply properly
+        hud.attachToContainer(container);
+
         // Enable gaming controls / touch joystick
         viewerHandle.state.gamingControls = true;
 
         const app = viewerHandle.app;
         const canvas = app.graphicsDevice.canvas as HTMLCanvasElement;
+
+        // Apply saved floorTilt & 6-DOF cropBounds once initial GLB entity finishes loading
+        const applySceneTransforms = (entity: Entity | null, sceneId: string) => {
+            if (!entity) return;
+            const sceneItem = property.sceneConfig?.scenes?.find((s) => s.sceneId === sceneId);
+            if (sceneItem?.floorEulerDeg && sceneItem.floorEulerDeg.length >= 3) {
+                entity.setLocalEulerAngles(
+                    sceneItem.floorEulerDeg[0],
+                    sceneItem.floorEulerDeg[1],
+                    sceneItem.floorEulerDeg[2]
+                );
+            }
+            applyCropBoundsToEntity(entity, sceneItem?.cropBounds ?? null);
+            app.renderNextFrame = true;
+        };
+
+        const applyInitialGlbWhenReady = () => {
+            const glbEntity = app.root.findByName(GLB_ENTITY_NAME) as Entity | null;
+            if (glbEntity) {
+                applySceneTransforms(glbEntity, activeSceneId);
+            }
+        };
+        applyInitialGlbWhenReady();
+        viewerHandle.events.on('firstFrame', applyInitialGlbWhenReady);
 
         // Context loss handling
         cleanupContextLoss = attachContextLossListeners(canvas, () => {
@@ -177,6 +220,15 @@ export async function initRealEstateViewer(
                 const { entity, asset } = await loadGlbEntity(app, nextModel.signedModelUrl, glbFilename);
                 currentGsplatEntity = entity;
                 currentGsplatAsset = asset;
+                const sceneItem = property.sceneConfig?.scenes?.find((s) => s.sceneId === roomId);
+                if (sceneItem?.floorEulerDeg && sceneItem.floorEulerDeg.length >= 3) {
+                    entity.setLocalEulerAngles(
+                        sceneItem.floorEulerDeg[0],
+                        sceneItem.floorEulerDeg[1],
+                        sceneItem.floorEulerDeg[2]
+                    );
+                }
+                applyCropBoundsToEntity(entity, sceneItem?.cropBounds ?? null);
             } else {
                 const rawName = extractFilename(nextModel.signedModelUrl, 'scene.sog');
                 const filename = rawName.toLowerCase().endsWith('.ply') || rawName.toLowerCase().endsWith('.sog')

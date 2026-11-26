@@ -238,6 +238,16 @@ export class RealEstateHUD {
         this.renderHotspots();
     }
 
+    public attachToContainer(container: HTMLElement) {
+        if (!this.rootElement) return;
+        const mount = container.classList.contains('sse-viewer')
+            ? container
+            : (container.querySelector('.sse-viewer') || container);
+        if (this.rootElement.parentElement !== mount) {
+            mount.appendChild(this.rootElement);
+        }
+    }
+
     public destroy() {
         if (this.rootElement && this.rootElement.parentNode) {
             this.rootElement.parentNode.removeChild(this.rootElement);
