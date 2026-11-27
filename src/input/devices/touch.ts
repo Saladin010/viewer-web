@@ -21,6 +21,8 @@ class TouchDevice implements InputDevice {
 
     private _global: Global | null = null;
 
+    private _canvas: HTMLCanvasElement | null = null;
+
     /** Touches currently active (running count from .read() deltas). */
     private _touchCount = 0;
 
@@ -34,16 +36,41 @@ class TouchDevice implements InputDevice {
     /** True for one frame after a tap is detected during gaming controls. */
     private _tapJump = false;
 
+    private _resetTouchState = () => {
+        this._touchCount = 0;
+        this._tapTouches = 0;
+        this._tapMaxTouches = 0;
+        this._tapDelta = 0;
+        this._tapJump = false;
+    };
+
+    private _onTouchEnd = (event: TouchEvent) => {
+        if (event.touches && event.touches.length === 0) {
+            this._touchCount = 0;
+            this._tapTouches = 0;
+        }
+    };
+
     get touchCount(): number {
         return this._touchCount;
     }
 
     attach(canvas: HTMLCanvasElement, global: Global): void {
         this._global = global;
+        this._canvas = canvas;
         this._source.attach(canvas);
+        canvas.addEventListener('touchcancel', this._resetTouchState);
+        canvas.addEventListener('touchend', this._onTouchEnd);
+        window.addEventListener('blur', this._resetTouchState);
     }
 
     detach(): void {
+        window.removeEventListener('blur', this._resetTouchState);
+        if (this._canvas) {
+            this._canvas.removeEventListener('touchcancel', this._resetTouchState);
+            this._canvas.removeEventListener('touchend', this._onTouchEnd);
+            this._canvas = null;
+        }
         this._source.detach();
         this._global = null;
     }

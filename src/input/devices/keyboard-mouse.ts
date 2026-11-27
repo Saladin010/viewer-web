@@ -61,6 +61,8 @@ class KeyboardMouseDevice implements InputDevice {
 
     private _global: Global | null = null;
 
+    private _canvas: HTMLCanvasElement | null = null;
+
     /** Running WASD/QE/arrow direction (sum of key states). */
     private _axis = new Vec3();
 
@@ -79,8 +81,18 @@ class KeyboardMouseDevice implements InputDevice {
     // releases reach `update` as ordinary deltas and unwind the running axis
     private _onInputEnabled = (enabled: boolean) => {
         if (!enabled) {
-            (this._source as unknown as KeyboardInternals)._keyNow.fill(0);
+            this._resetState();
         }
+    };
+
+    private _resetState = () => {
+        (this._source as unknown as KeyboardInternals)._keyNow?.fill(0);
+        this._buttons.fill(0);
+        this._shift = 0;
+        this._ctrl = 0;
+        this._jump = 0;
+        this._axis.set(0, 0, 0);
+        this._flyKeyVelocity.set(0, 0, 0);
     };
 
     /**
@@ -96,13 +108,23 @@ class KeyboardMouseDevice implements InputDevice {
 
     attach(canvas: HTMLCanvasElement, global: Global): void {
         this._global = global;
+        this._canvas = canvas;
         patchKeyboardMeta(this._source as unknown as KeyboardInternals, () => global.state.inputEnabled);
         this._source.attach(canvas);
         global.events.on('inputEnabled:changed', this._onInputEnabled);
+        window.addEventListener('blur', this._resetState);
+        canvas.addEventListener('contextmenu', this._resetState);
+        canvas.addEventListener('pointercancel', this._resetState);
     }
 
     detach(): void {
         this._global?.events.off('inputEnabled:changed', this._onInputEnabled);
+        window.removeEventListener('blur', this._resetState);
+        if (this._canvas) {
+            this._canvas.removeEventListener('contextmenu', this._resetState);
+            this._canvas.removeEventListener('pointercancel', this._resetState);
+            this._canvas = null;
+        }
         this._source.detach();
         this._global = null;
     }
@@ -120,12 +142,12 @@ class KeyboardMouseDevice implements InputDevice {
                 key[keyCode.W] - key[keyCode.S] + (key[keyCode.UP] - key[keyCode.DOWN])
             )
         );
-        this._jump += key[keyCode.SPACE];
-        this._shift += key[keyCode.SHIFT];
-        this._ctrl += key[keyCode.CTRL];
+        this._jump = Math.max(0, this._jump + key[keyCode.SPACE]);
+        this._shift = Math.max(0, this._shift + key[keyCode.SHIFT]);
+        this._ctrl = Math.max(0, this._ctrl + key[keyCode.CTRL]);
         const n = Math.min(button.length, this._buttons.length);
         for (let i = 0; i < n; i++) {
-            this._buttons[i] += button[i];
+            this._buttons[i] = Math.max(0, Math.min(1, this._buttons[i] + button[i]));
         }
 
         const { isOrbit, isFly, isWalk, isFirstPerson, gamingControls, dt, distance, cameraComponent, mode, touchCount } = ctx;

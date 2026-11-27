@@ -346,6 +346,29 @@ class Viewer {
         const prevProj = new Mat4();
         const prevWorld = new Mat4();
         const sceneBound = new BoundingBox();
+        let verticalFovLock = false;
+
+        const onVerticalFovLock = events.on('realestate:setVerticalFovLock', (locked: boolean) => {
+            verticalFovLock = Boolean(locked);
+        });
+        const onAssemblyBbox = events.on(
+            'realestate:setAssemblyBbox',
+            (bboxInput: BoundingBox | { min: number[]; max: number[] } | null) => {
+                if (!bboxInput) return;
+                if (bboxInput instanceof BoundingBox) {
+                    sceneBound.copy(bboxInput);
+                } else if (Array.isArray(bboxInput.min) && Array.isArray(bboxInput.max)) {
+                    sceneBound.setMinMax(
+                        new Vec3(bboxInput.min[0], bboxInput.min[1], bboxInput.min[2]),
+                        new Vec3(bboxInput.max[0], bboxInput.max[1], bboxInput.max[2])
+                    );
+                }
+            }
+        );
+        this.onDestroy(() => {
+            onVerticalFovLock.off();
+            onAssemblyBbox.off();
+        });
 
         // track the camera state and trigger a render when it changes
         app.on('framerender', () => {
@@ -375,7 +398,7 @@ class Viewer {
             cameraEntity.setEulerAngles(camera.angles);
             cameraEntity.camera.fov = camera.fov;
 
-            cameraEntity.camera.horizontalFov = graphicsDevice.width > graphicsDevice.height;
+            cameraEntity.camera.horizontalFov = verticalFovLock ? false : graphicsDevice.width > graphicsDevice.height;
 
             // fit clipping planes to bounding box
             const boundRadius = sceneBound.halfExtents.length();
@@ -385,14 +408,10 @@ class Viewer {
             const dist = vec.dot(cameraEntity.forward);
 
             const far = Math.max(dist + boundRadius, 1e-2);
-            // the near plane's floor is capped at the orbit's closest zoom: a few stray splats far
-            // outside a scene stretch its bound, and a floor of far / 16k would then cull the
-            // streamed nodes just in front of the camera, and flatten the stochastic renderer's
-            // depths there
             const near = Math.max(dist - boundRadius, Math.min(far / (1024 * 16), 0.01));
 
             cameraEntity.camera.farClip = far;
-            cameraEntity.camera.nearClip = Math.min(1.0, near);
+            cameraEntity.camera.nearClip = Math.min(0.05, near);
         };
 
         // handle application update

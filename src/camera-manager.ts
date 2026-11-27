@@ -273,6 +273,7 @@ class CameraManager {
 
         let assemblyBounds: BoundingBox | null = null;
         let activeFrameCamera = frameCamera;
+        let orbitLocked = false;
 
         // application update
         this.update = (deltaTime: number, frame: CameraFrame) => {
@@ -306,7 +307,7 @@ class CameraManager {
                     );
                 } else if (state.cameraMode === 'orbit') {
                     const orbitMargin = Math.max(8, halfExtents.length() * 2.2);
-                    clampPointToBox(
+                    const clamped = clampPointToBox(
                         target.position,
                         center.x - halfExtents.x - orbitMargin,
                         center.y - halfExtents.y - orbitMargin,
@@ -315,6 +316,9 @@ class CameraManager {
                         center.y + halfExtents.y + orbitMargin,
                         center.z + halfExtents.z + orbitMargin
                     );
+                    if (clamped) {
+                        controllers.orbit.goto(target);
+                    }
                 }
             }
 
@@ -391,6 +395,7 @@ class CameraManager {
                     }
                     break;
                 case 'requestFirstPerson':
+                    if (orbitLocked) break;
                     // movement input from a non-first-person mode: walk where the scene allows
                     // it, fly otherwise, the same preference as the animation fallback
                     state.cameraMode = walkAllowed ? 'walk' : 'fly';
@@ -474,6 +479,11 @@ class CameraManager {
             controllers.anim.animState.cursor.value = time;
             state.animationTime = controllers.anim.animState.cursor.value;
         };
+
+        events.on('realestate:lockOrbit', (locked: boolean) => {
+            orbitLocked = Boolean(locked);
+            controllers.orbit.controller.zoomRange.set(orbitLocked ? 0.25 : 0.01, orbitLocked ? 120 : Infinity);
+        });
 
         // Allow RealEstate host to configure soft apartment bounding-box clamping
         events.on(

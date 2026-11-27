@@ -101,9 +101,31 @@ export async function initRealEstateViewer(
 
     let viewerHandle: ViewerHandle | null = null;
     let cleanupContextLoss: (() => void) | null = null;
+    let cleanupContextMenu: (() => void) | null = null;
     let currentGsplatEntity: Entity | null = null;
     let currentGsplatAsset: Asset | null = null;
     let destroyed = false;
+
+    const getViewportAspect = (): number => {
+        const canvasEl = viewerHandle?.app?.graphicsDevice?.canvas as HTMLCanvasElement | undefined;
+        if (canvasEl && canvasEl.clientHeight > 0) {
+            return canvasEl.clientWidth / canvasEl.clientHeight;
+        }
+        if (container && container.clientHeight > 0) {
+            return container.clientWidth / container.clientHeight;
+        }
+        if (typeof window !== 'undefined' && window.innerHeight > 0) {
+            return window.innerWidth / window.innerHeight;
+        }
+        return 16 / 9;
+    };
+
+    const adaptFovForViewport = (baseFov: number, aspect: number): number => {
+        if (aspect < 0.85) {
+            return Math.min(78, baseFov / Math.max(0.65, aspect * 1.15));
+        }
+        return baseFov;
+    };
 
     // MultiRoom runtime registries (O(1) lookup)
     const loadedRooms = new Map<string, LoadedRoom>();
@@ -127,11 +149,12 @@ export async function initRealEstateViewer(
         targetEntity?: Entity | null,
         explicitPose?: { position: number[]; lookAt: number[]; fov?: number }
     ): { position: number[]; target: number[]; fov: number } | null => {
+        const aspect = getViewportAspect();
         if (explicitPose?.position?.length >= 3 && explicitPose?.lookAt?.length >= 3) {
             return {
                 position: explicitPose.position,
                 target: explicitPose.lookAt,
-                fov: explicitPose.fov ?? 50
+                fov: adaptFovForViewport(explicitPose.fov ?? 50, aspect)
             };
         }
 
@@ -142,12 +165,12 @@ export async function initRealEstateViewer(
             return {
                 position: saved.position,
                 target: saved.lookAt,
-                fov: saved.fov ?? 50
+                fov: adaptFovForViewport(saved.fov ?? 50, aspect)
             };
         }
 
         const entity = targetEntity ?? loadedRooms.get(roomKey)?.entity ?? null;
-        return computeStudioOrbitPose(entity);
+        return computeStudioOrbitPose(entity, aspect);
     };
 
     const applyStudioOrbitForScene = (sceneId: string, targetEntity?: Entity | null, immediate = false) => {
@@ -170,7 +193,7 @@ export async function initRealEstateViewer(
 
         const app = viewerHandle.app;
         const glb = targetEntity ?? (app.root.findByName(GLB_ENTITY_NAME) as Entity | null);
-        const computed = computeStudioOrbitPose(glb);
+        const computed = computeStudioOrbitPose(glb, getViewportAspect());
         if (computed) {
             viewerHandle.events.fire('realestate:gotoPose', {
                 position: computed.position,
@@ -191,7 +214,7 @@ export async function initRealEstateViewer(
         },
         onResetCamera: () => {
             if (isMultiRoom && apartmentBbox && viewerHandle) {
-                const overview = computeOrbitPoseForBound(apartmentBbox);
+                const overview = computeOrbitPoseForBound(apartmentBbox, getViewportAspect());
                 if (overview) {
                     viewerHandle.state.gamingControls = false;
                     viewerHandle.state.animationPaused = true;
@@ -261,7 +284,7 @@ export async function initRealEstateViewer(
                             Number(initialSpawn.lookAt[1]) || 1.6,
                             Number(initialSpawn.lookAt[2]) || 0
                         ],
-                        fov: initialSpawn.fov ?? 50
+                        fov: adaptFovForViewport(initialSpawn.fov ?? 50, getViewportAspect())
                     }
                 }
             ];
@@ -282,12 +305,19 @@ export async function initRealEstateViewer(
         // Re-mount HUD inside .sse-viewer so canvas fills 100% cleanly behind it
         hud.attachToContainer(container);
 
-        // Lock mobile gestures to pure Orbit (1-finger rotate, 2-finger pinch zoom + 2-finger pan)
+        // Lock mobile/desktop controls to Studio-matched Orbit (1-finger/LMB rotate, 2-finger/RMB pan, pinch/wheel zoom)
         viewerHandle.state.gamingControls = false;
         viewerHandle.state.animationPaused = true;
+        viewerHandle.events.fire('realestate:setVerticalFovLock', true);
+        viewerHandle.events.fire('realestate:lockOrbit', true);
 
         const app = viewerHandle.app;
         const canvas = app.graphicsDevice.canvas as HTMLCanvasElement;
+        const preventContextMenu = (e: Event) => e.preventDefault();
+        canvas.addEventListener('contextmenu', preventContextMenu);
+        cleanupContextMenu = () => {
+            canvas.removeEventListener('contextmenu', preventContextMenu);
+        };
 
         const applySceneTransforms = (entity: Entity | null, sceneKey: string) => {
             if (!entity) return;
@@ -542,6 +572,10 @@ export async function initRealEstateViewer(
 
     const destroy = () => {
         destroyed = true;
+        if (cleanupContextMenu) {
+            cleanupContextMenu();
+            cleanupContextMenu = null;
+        }
         if (cleanupContextLoss) {
             cleanupContextLoss();
             cleanupContextLoss = null;

@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it, mock } from 'node:test';
 
-import { Mat4, Vec3 } from 'playcanvas';
+import { BoundingBox, Mat4, Vec3 } from 'playcanvas';
 
 import {
     buildPropertyIndexMaps,
     clampPointToBox,
     computeLocalCropPlanes,
+    computeOrbitPoseForBound,
     extractPreviewPropertyId,
     fetchPropertyAssemblyPreview,
     fetchPublicShare,
@@ -288,5 +289,20 @@ describe('RealEstate3D Multi-Room Assembly Engine', () => {
         const wasOutsideClamped = clampPointToBox(outside, -5, 0, -5, 5, 4, 5);
         assert.strictEqual(wasOutsideClamped, true);
         assert.deepStrictEqual([outside.x, outside.y, outside.z], [-5, 4, 5]);
+    });
+
+    it('frames rooms comfortably on portrait mobile as well as desktop (computeOrbitPoseForBound)', () => {
+        const roomBox = new BoundingBox(new Vec3(0, 1.5, 0), new Vec3(3, 1.5, 3));
+        const desktopPose = computeOrbitPoseForBound(roomBox, 16 / 9);
+        const mobilePose = computeOrbitPoseForBound(roomBox, 9 / 20);
+        assert.ok(desktopPose && mobilePose);
+
+        const desktopDist = new Vec3(...desktopPose.position).distance(new Vec3(...desktopPose.target));
+        const mobileDist = new Vec3(...mobilePose.position).distance(new Vec3(...mobilePose.target));
+        assert.ok(desktopDist >= 2.0);
+        assert.ok(
+            mobileDist > desktopDist * 1.5,
+            `Expected portrait mobile orbit distance (${mobileDist}) to pull back farther than desktop (${desktopDist})`
+        );
     });
 });

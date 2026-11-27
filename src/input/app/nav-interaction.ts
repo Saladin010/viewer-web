@@ -57,9 +57,16 @@ class NavInteraction {
 
     private _lastTap = { time: 0, x: 0, y: 0 };
 
+    private _orbitLocked = false;
+
     constructor(picker: ScenePicker) {
         this._picker = picker;
     }
+
+    private _onLockOrbit = (locked: boolean) => {
+        this._orbitLocked = Boolean(locked);
+        this._updateCursor();
+    };
 
     private _updateCursor = () => {
         const global = this._global;
@@ -70,7 +77,7 @@ class NavInteraction {
             state.inputMode === 'desktop' &&
             ((state.cameraMode === 'walk' && !state.gamingControls) ||
                 canTargetFly(global) ||
-                state.cameraMode === 'orbit');
+                (state.cameraMode === 'orbit' && !this._orbitLocked));
         if (canClickTarget) {
             canvas.style.cursor = this._mouseClickTracking ? 'default' : 'pointer';
         } else {
@@ -230,7 +237,7 @@ class NavInteraction {
                     }
                 } else if (state.cameraMode === 'fly') {
                     this._flyToPickedPosition(this._lastPointerOffsetX, this._lastPointerOffsetY, event);
-                } else if (state.cameraMode === 'orbit') {
+                } else if (state.cameraMode === 'orbit' && !this._orbitLocked) {
                     this._focusPickedPosition(this._lastPointerOffsetX, this._lastPointerOffsetY);
                 }
             }
@@ -244,6 +251,7 @@ class NavInteraction {
         if (eventName !== 'dblclick') return;
         if (!(event instanceof MouseEvent)) return;
         const { events, state } = global;
+        if (this._orbitLocked && state.cameraMode === 'orbit') return;
         // dblclick/double-tap in gaming controls does nothing, like click/tap
         if ((state.cameraMode === 'walk' || state.cameraMode === 'fly') && state.gamingControls) return;
 
@@ -283,7 +291,7 @@ class NavInteraction {
             }
         } else if (state.cameraMode === 'fly') {
             this._flyToPickedPosition(this._lastPointerOffsetX, this._lastPointerOffsetY);
-        } else if (state.cameraMode === 'orbit') {
+        } else if (state.cameraMode === 'orbit' && !this._orbitLocked) {
             this._focusPickedPosition(this._lastPointerOffsetX, this._lastPointerOffsetY);
         }
     };
@@ -303,10 +311,11 @@ class NavInteraction {
         // mobile tap (no movement) → walk/fly target or orbit focus
         events.on('mobileTap', this._onMobileTap);
 
-        // refresh cursor on mode / gaming-controls change
+        // refresh cursor on mode / gaming-controls / orbit-lock change
         events.on('cameraMode:changed', this._onCameraModeChanged);
         events.on('inputMode:changed', this._updateCursor);
         events.on('gamingControls:changed', this._updateCursor);
+        events.on('realestate:lockOrbit', this._onLockOrbit);
     }
 
     detach(): void {
@@ -322,6 +331,7 @@ class NavInteraction {
             events.off('cameraMode:changed', this._onCameraModeChanged);
             events.off('inputMode:changed', this._updateCursor);
             events.off('gamingControls:changed', this._updateCursor);
+            events.off('realestate:lockOrbit', this._onLockOrbit);
         }
         this._canvas = null;
         this._global = null;

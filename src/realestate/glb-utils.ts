@@ -332,12 +332,18 @@ export const runBoundedConcurrency = async <T, R>(
 
 /**
  * Compute an external Studio-style orbit camera pose framing a loaded GLB mesh or BoundingBox.
+ * Adapts distance for narrow portrait viewports so rooms never appear oversized on mobile.
  */
 export const computeOrbitPoseForBound = (
-    bound: BoundingBox | null | undefined
+    bound: BoundingBox | null | undefined,
+    aspect = 16 / 9
 ): { position: number[]; target: number[]; fov: number } | null => {
     if (!bound) return null;
-    const distance = Math.max(1.5, Math.min(50, bound.halfExtents.length() * 1.6));
+    const fov = 50;
+    const halfV = (fov * Math.PI) / 180 / 2;
+    const safeAspect = Number.isFinite(aspect) && aspect > 0 ? Math.max(0.35, aspect) : 16 / 9;
+    const effectiveHalf = Math.min(halfV, Math.atan(Math.tan(halfV) * safeAspect));
+    const distance = Math.max(2.0, Math.min(50, (bound.halfExtents.length() * 1.1) / Math.tan(effectiveHalf)));
     const az = (35 * Math.PI) / 180;
     const el = (-20 * Math.PI) / 180;
     const cosEl = Math.cos(el);
@@ -348,12 +354,13 @@ export const computeOrbitPoseForBound = (
             bound.center.z + distance * cosEl * Math.cos(az)
         ],
         target: [bound.center.x, bound.center.y, bound.center.z],
-        fov: 50
+        fov
     };
 };
 
 export const computeStudioOrbitPose = (
-    rootEntity: Entity | null | undefined
+    rootEntity: Entity | null | undefined,
+    aspect = 16 / 9
 ): { position: number[]; target: number[]; fov: number } | null => {
-    return computeOrbitPoseForBound(computeEntityBoundingBox(rootEntity));
+    return computeOrbitPoseForBound(computeEntityBoundingBox(rootEntity), aspect);
 };
