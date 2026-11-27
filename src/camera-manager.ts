@@ -1,5 +1,4 @@
-import { Vec3 } from 'playcanvas';
-import type { BoundingBox } from 'playcanvas';
+import { BoundingBox, Vec3 } from 'playcanvas';
 
 import { createFigure8Track } from './animation/create-figure8-track';
 import { createRotateTrack } from './animation/create-rotate-track';
@@ -77,6 +76,40 @@ const createFrameCamera = (bbox: BoundingBox, fov: number) => {
     const sceneSize = bbox.halfExtents.length();
     const distance = sceneSize / Math.sin((fov / 180) * Math.PI * 0.5);
     return createCamera(new Vec3(2, 1, 2).normalize().mulScalar(distance).add(bbox.center), bbox.center, fov);
+};
+
+export const clampPointToBox = (
+    point: Vec3,
+    minX: number,
+    minY: number,
+    minZ: number,
+    maxX: number,
+    maxY: number,
+    maxZ: number
+): boolean => {
+    let clamped = false;
+    if (point.x < minX) {
+        point.x = minX;
+        clamped = true;
+    } else if (point.x > maxX) {
+        point.x = maxX;
+        clamped = true;
+    }
+    if (point.y < minY) {
+        point.y = minY;
+        clamped = true;
+    } else if (point.y > maxY) {
+        point.y = maxY;
+        clamped = true;
+    }
+    if (point.z < minZ) {
+        point.z = minZ;
+        clamped = true;
+    } else if (point.z > maxZ) {
+        point.z = maxZ;
+        clamped = true;
+    }
+    return clamped;
 };
 
 class CameraManager {
@@ -238,6 +271,9 @@ class CameraManager {
             global.app.renderNextFrame = true;
         };
 
+        let assemblyBounds: BoundingBox | null = null;
+        let activeFrameCamera = frameCamera;
+
         // application update
         this.update = (deltaTime: number, frame: CameraFrame) => {
             // use dt of 0 if animation is paused
@@ -252,6 +288,35 @@ class CameraManager {
             sourcesByMode[state.cameraMode]?.update(dt, this.camera, frame);
 
             controller.update(dt, frame, target);
+
+            // Soft apartment bounding-box clamping for Walk & Orbit when assemblyBbox is provided
+            if (assemblyBounds && transitionTimer >= 1) {
+                const { center, halfExtents } = assemblyBounds;
+                if (state.cameraMode === 'walk') {
+                    const marginXZ = 2.0;
+                    const marginY = 1.5;
+                    clampPointToBox(
+                        target.position,
+                        center.x - halfExtents.x - marginXZ,
+                        center.y - halfExtents.y - marginY,
+                        center.z - halfExtents.z - marginXZ,
+                        center.x + halfExtents.x + marginXZ,
+                        center.y + halfExtents.y + marginY,
+                        center.z + halfExtents.z + marginXZ
+                    );
+                } else if (state.cameraMode === 'orbit') {
+                    const orbitMargin = Math.max(8, halfExtents.length() * 2.2);
+                    clampPointToBox(
+                        target.position,
+                        center.x - halfExtents.x - orbitMargin,
+                        center.y - halfExtents.y - orbitMargin,
+                        center.z - halfExtents.z - orbitMargin,
+                        center.x + halfExtents.x + orbitMargin,
+                        center.y + halfExtents.y + orbitMargin,
+                        center.z + halfExtents.z + orbitMargin
+                    );
+                }
+            }
 
             if (transitionTimer < 1) {
                 // lerp away from previous camera during transition
@@ -292,7 +357,7 @@ class CameraManager {
                 case 'frame':
                     events.fire('orbitTarget:clear');
                     state.cameraMode = 'orbit';
-                    controllers.orbit.goto(frameCamera);
+                    controllers.orbit.goto(activeFrameCamera);
                     startTransition();
                     break;
                 case 'reset':
@@ -410,25 +475,62 @@ class CameraManager {
             state.animationTime = controllers.anim.animState.cursor.value;
         };
 
-        // Allow RealEstate host to snap/transition orbit pose to a Studio camera framing
-        events.on('realestate:gotoPose', (pose: { position: number[]; target: number[]; fov?: number; immediate?: boolean }) => {
-            if (!pose?.position || !pose?.target) return;
-            events.fire('orbitTarget:clear');
-            state.cameraMode = 'orbit';
-            const cam = createCamera(
-                new Vec3(pose.position[0], pose.position[1], pose.position[2]),
-                new Vec3(pose.target[0], pose.target[1], pose.target[2]),
-                pose.fov ?? defaultFov
-            );
-            controllers.orbit.goto(cam);
-            if (pose.immediate) {
-                target.copy(cam);
-                this.camera.copy(cam);
-                transitionTimer = 1;
-            } else {
-                startTransition(0.45);
+        // Allow RealEstate host to configure soft apartment bounding-box clamping
+        events.on(
+            'realestate:setAssemblyBbox',
+            (bboxInput: BoundingBox | { min: number[]; max: number[] } | null) => {
+                if (!bboxInput) {
+                    assemblyBounds = null;
+                    controllers.walk.cropBounds = null;
+                    activeFrameCamera = frameCamera;
+                    return;
+                }
+
+                const nextBox = new BoundingBox();
+                if (bboxInput instanceof BoundingBox) {
+                    nextBox.copy(bboxInput);
+                } else if (Array.isArray(bboxInput.min) && Array.isArray(bboxInput.max)) {
+                    nextBox.setMinMax(
+                        new Vec3(bboxInput.min[0], bboxInput.min[1], bboxInput.min[2]),
+                        new Vec3(bboxInput.max[0], bboxInput.max[1], bboxInput.max[2])
+                    );
+                } else {
+                    return;
+                }
+
+                assemblyBounds = nextBox;
+                activeFrameCamera = createFrameCamera(nextBox, defaultFov);
+                const { center, halfExtents } = nextBox;
+                controllers.walk.cropBounds = {
+                    min: [center.x - halfExtents.x - 1.5, center.y - halfExtents.y - 1.0, center.z - halfExtents.z - 1.5],
+                    max: [center.x + halfExtents.x + 1.5, center.y + halfExtents.y + 1.5, center.z + halfExtents.z + 1.5]
+                };
             }
-        });
+        );
+
+        // Allow RealEstate host to snap/transition orbit pose to a Studio camera framing
+        events.on(
+            'realestate:gotoPose',
+            (pose: { position: number[]; target: number[]; fov?: number; immediate?: boolean; duration?: number }) => {
+                if (!pose?.position || !pose?.target) return;
+                events.fire('orbitTarget:clear');
+                state.cameraMode = 'orbit';
+                const cam = createCamera(
+                    new Vec3(pose.position[0], pose.position[1], pose.position[2]),
+                    new Vec3(pose.target[0], pose.target[1], pose.target[2]),
+                    pose.fov ?? defaultFov
+                );
+                controllers.orbit.goto(cam);
+                if (pose.immediate) {
+                    target.copy(cam);
+                    this.camera.copy(cam);
+                    transitionTimer = 1;
+                } else {
+                    const duration = typeof pose.duration === 'number' && pose.duration > 0 ? pose.duration : 0.8;
+                    startTransition(duration);
+                }
+            }
+        );
 
         // handle user picking in the scene
         events.on('pick', (position: Vec3) => {

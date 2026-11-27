@@ -1,48 +1,126 @@
 import type { AppBase, ContainerResource, RenderComponent, StandardMaterial } from 'playcanvas';
-import { Asset, BoundingBox, Color, Entity, Plane, Vec3 } from 'playcanvas';
-import type { CropBoundsDto } from './types';
+import { Asset, BoundingBox, Color, Entity, Mat4, Plane, Vec3 } from 'playcanvas';
+
+import type { CropBoundsDto, RoomTransformDto } from './types';
 
 export const GLB_ENTITY_NAME = 'glbModel';
 
+const LOCAL_CLIP_SPECS: [number, number, number, number][] = [
+    [0, 1, 0, 0], // minX -> +X
+    [1, -1, 0, 0], // maxX -> -X
+    [2, 0, 1, 0], // minY -> +Y
+    [3, 0, -1, 0], // maxY -> -Y
+    [4, 0, 0, 1], // minZ -> +Z
+    [5, 0, 0, -1] // maxZ -> -Z
+];
+
+const tmpNormalMat = new Mat4();
+const tmpLocalPt = new Vec3();
+const tmpLocalN = new Vec3();
+const tmpWorldPt = new Vec3();
+const tmpWorldN = new Vec3();
+
+const toSixTupleBounds = (
+    bounds?: CropBoundsDto | number[] | null
+): [number, number, number, number, number, number] | null => {
+    if (!bounds) return null;
+    if (Array.isArray(bounds) && bounds.length === 6 && bounds.every((n) => Number.isFinite(n))) {
+        return [bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5]];
+    }
+    if (!Array.isArray(bounds) && bounds.min?.length >= 3 && bounds.max?.length >= 3) {
+        const tuple: [number, number, number, number, number, number] = [
+            Number(bounds.min[0]),
+            Number(bounds.max[0]),
+            Number(bounds.min[1]),
+            Number(bounds.max[1]),
+            Number(bounds.min[2]),
+            Number(bounds.max[2])
+        ];
+        if (tuple.every((n) => Number.isFinite(n))) {
+            return tuple;
+        }
+    }
+    return null;
+};
+
 /**
- * Apply 6-DOF axis-aligned clipping planes to every MeshInstance under rootEntity
- * using PlayCanvas's native MeshInstance#clippingPlanes (works in WebGL2 & WebGPU).
+ * Compute world-space clipping planes from local-space 6-DOF crop bounds
+ * transformed by the entity's world matrix.
  */
-export const applyCropBoundsToEntity = (
+export const computeLocalCropPlanes = (
+    worldTransform: Mat4,
+    bounds?: CropBoundsDto | number[] | null
+): Plane[] => {
+    const tuple = toSixTupleBounds(bounds);
+    if (!tuple) return [];
+
+    tmpNormalMat.copy(worldTransform).invert().transpose();
+
+    return LOCAL_CLIP_SPECS.map(([idx, nx, ny, nz]) => {
+        const coord = tuple[idx];
+        if (idx < 2) {
+            tmpLocalPt.set(coord, 0, 0);
+        } else if (idx < 4) {
+            tmpLocalPt.set(0, coord, 0);
+        } else {
+            tmpLocalPt.set(0, 0, coord);
+        }
+        tmpLocalN.set(nx, ny, nz);
+
+        worldTransform.transformPoint(tmpLocalPt, tmpWorldPt);
+        tmpNormalMat.transformVector(tmpLocalN, tmpWorldN);
+        if (tmpWorldN.lengthSq() > 1e-12) {
+            tmpWorldN.normalize();
+        } else {
+            tmpWorldN.copy(tmpLocalN);
+        }
+        return new Plane().setFromPointNormal(tmpWorldPt.clone(), tmpWorldN.clone());
+    });
+};
+
+/**
+ * Apply 6-DOF local-space clipping planes to every MeshInstance under rootEntity
+ * using rootEntity's world transform.
+ */
+export const applyLocalCropBoundsToEntity = (
     rootEntity: Entity | null | undefined,
     bounds?: CropBoundsDto | number[] | null
 ): void => {
     if (!rootEntity) return;
 
-    let planes: Plane[] = [];
-    if (Array.isArray(bounds) && bounds.length === 6 && bounds.every((n) => Number.isFinite(n))) {
-        const [minX, maxX, minY, maxY, minZ, maxZ] = bounds;
-        planes = [
-            new Plane().setFromPointNormal(new Vec3(minX, 0, 0), new Vec3(1, 0, 0)),
-            new Plane().setFromPointNormal(new Vec3(maxX, 0, 0), new Vec3(-1, 0, 0)),
-            new Plane().setFromPointNormal(new Vec3(0, minY, 0), new Vec3(0, 1, 0)),
-            new Plane().setFromPointNormal(new Vec3(0, maxY, 0), new Vec3(0, -1, 0)),
-            new Plane().setFromPointNormal(new Vec3(0, 0, minZ), new Vec3(0, 0, 1)),
-            new Plane().setFromPointNormal(new Vec3(0, 0, maxZ), new Vec3(0, 0, -1))
-        ];
-    } else if (bounds && !Array.isArray(bounds) && bounds.min?.length === 3 && bounds.max?.length === 3) {
-        const [minX, minY, minZ] = bounds.min;
-        const [maxX, maxY, maxZ] = bounds.max;
-        planes = [
-            new Plane().setFromPointNormal(new Vec3(minX, 0, 0), new Vec3(1, 0, 0)),
-            new Plane().setFromPointNormal(new Vec3(maxX, 0, 0), new Vec3(-1, 0, 0)),
-            new Plane().setFromPointNormal(new Vec3(0, minY, 0), new Vec3(0, 1, 0)),
-            new Plane().setFromPointNormal(new Vec3(0, maxY, 0), new Vec3(0, -1, 0)),
-            new Plane().setFromPointNormal(new Vec3(0, 0, minZ), new Vec3(0, 0, 1)),
-            new Plane().setFromPointNormal(new Vec3(0, 0, maxZ), new Vec3(0, 0, -1))
-        ];
-    }
-
+    const planes = computeLocalCropPlanes(rootEntity.getWorldTransform(), bounds);
     const renders = rootEntity.findComponents('render') as RenderComponent[];
     for (const render of renders) {
         for (const mi of render.meshInstances) {
             mi.clippingPlanes = planes;
         }
+    }
+};
+
+export const applyCropBoundsToEntity = applyLocalCropBoundsToEntity;
+
+export const applyTransformToEntity = (
+    entity: Entity | null | undefined,
+    transform?: Partial<RoomTransformDto> | null
+): void => {
+    if (!entity || !transform) return;
+    if (Array.isArray(transform.position) && transform.position.length >= 3) {
+        entity.setLocalPosition(
+            Number(transform.position[0]) || 0,
+            Number(transform.position[1]) || 0,
+            Number(transform.position[2]) || 0
+        );
+    }
+    if (Array.isArray(transform.rotationEulerDeg) && transform.rotationEulerDeg.length >= 3) {
+        entity.setLocalEulerAngles(
+            Number(transform.rotationEulerDeg[0]) || 0,
+            Number(transform.rotationEulerDeg[1]) || 0,
+            Number(transform.rotationEulerDeg[2]) || 0
+        );
+    }
+    if (typeof transform.scale === 'number' && Number.isFinite(transform.scale)) {
+        const s = Math.max(0.01, transform.scale);
+        entity.setLocalScale(s, s, s);
     }
 };
 
@@ -149,6 +227,25 @@ export const loadGlbEntity = (
     });
 };
 
+export const loadGlbEntityWithTransform = async (
+    app: AppBase,
+    url: string,
+    transform?: Partial<RoomTransformDto> | null,
+    instanceId?: string,
+    filename?: string | null,
+    progressCallback?: (progress: number) => void,
+    cancelled?: () => boolean
+): Promise<{ entity: Entity; asset: Asset }> => {
+    const { entity, asset } = await loadGlbEntity(app, url, filename, progressCallback, cancelled);
+    if (instanceId) {
+        (entity as Entity & { __instanceId?: string }).__instanceId = instanceId;
+    }
+    if (transform) {
+        applyTransformToEntity(entity, transform);
+    }
+    return { entity, asset };
+};
+
 export const disposeRoomEntities = (app: AppBase): void => {
     const targets = app.root.children.filter(
         (child) => child.name === 'gsplat' || child.name === GLB_ENTITY_NAME
@@ -169,29 +266,77 @@ export const disposeRoomEntities = (app: AppBase): void => {
     }
 };
 
-/**
- * Compute an external Studio-style orbit camera pose framing a loaded GLB mesh.
- */
-export const computeStudioOrbitPose = (
-    rootEntity: Entity | null | undefined
-): { position: number[]; target: number[]; fov: number } | null => {
-    if (!rootEntity) return null;
+export const computeEntityBoundingBox = (
+    rootEntity: Entity | null | undefined,
+    target = new BoundingBox()
+): BoundingBox | null => {
+    if (!rootEntity || !rootEntity.enabled) return null;
     const renders = rootEntity.findComponents('render') as RenderComponent[];
-    const bound = new BoundingBox();
     let valid = false;
     for (const render of renders) {
         for (const mi of render.meshInstances) {
             if (!mi.aabb) continue;
             if (!valid) {
-                bound.copy(mi.aabb);
+                target.copy(mi.aabb);
                 valid = true;
             } else {
-                bound.add(mi.aabb);
+                target.add(mi.aabb);
             }
         }
     }
-    if (!valid) return null;
+    return valid ? target : null;
+};
 
+export const computeUnifiedBoundingBox = (entities: Iterable<Entity | null | undefined>): BoundingBox | null => {
+    const unified = new BoundingBox();
+    const roomBox = new BoundingBox();
+    let valid = false;
+    for (const entity of entities) {
+        if (!entity || !entity.enabled) continue;
+        if (!computeEntityBoundingBox(entity, roomBox)) continue;
+        if (!valid) {
+            unified.copy(roomBox);
+            valid = true;
+        } else {
+            unified.add(roomBox);
+        }
+    }
+    return valid ? unified : null;
+};
+
+/**
+ * CRIT-03: Bounded concurrency queue using an atomic cursor (zero Array.shift()).
+ */
+export const runBoundedConcurrency = async <T, R>(
+    items: readonly T[],
+    concurrency: number,
+    worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> => {
+    if (items.length === 0) return [];
+    const limit = Math.max(1, Math.floor(concurrency));
+    const results = new Array<R>(items.length);
+    let cursor = 0;
+
+    const runWorker = async () => {
+        while (true) {
+            const idx = cursor++;
+            if (idx >= items.length) return;
+            results[idx] = await worker(items[idx], idx);
+        }
+    };
+
+    const workerCount = Math.min(limit, items.length);
+    await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+    return results;
+};
+
+/**
+ * Compute an external Studio-style orbit camera pose framing a loaded GLB mesh or BoundingBox.
+ */
+export const computeOrbitPoseForBound = (
+    bound: BoundingBox | null | undefined
+): { position: number[]; target: number[]; fov: number } | null => {
+    if (!bound) return null;
     const distance = Math.max(1.5, Math.min(50, bound.halfExtents.length() * 1.6));
     const az = (35 * Math.PI) / 180;
     const el = (-20 * Math.PI) / 180;
@@ -205,4 +350,10 @@ export const computeStudioOrbitPose = (
         target: [bound.center.x, bound.center.y, bound.center.z],
         fov: 50
     };
+};
+
+export const computeStudioOrbitPose = (
+    rootEntity: Entity | null | undefined
+): { position: number[]; target: number[]; fov: number } | null => {
+    return computeOrbitPoseForBound(computeEntityBoundingBox(rootEntity));
 };

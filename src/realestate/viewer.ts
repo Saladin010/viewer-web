@@ -1,19 +1,27 @@
+import type { BoundingBox } from 'playcanvas';
 import { Asset, Entity } from 'playcanvas';
+
 import type { CreateViewerOptions } from '../options';
 import { defaultSettings } from '../schemas/defaults';
 import type { ViewerHandle } from '../types';
+
 import {
-    applyCropBoundsToEntity,
+    applyLocalCropBoundsToEntity,
+    applyTransformToEntity,
+    computeOrbitPoseForBound,
     computeStudioOrbitPose,
+    computeUnifiedBoundingBox,
     disposeRoomEntities,
     extractFilename,
     GLB_ENTITY_NAME,
     isGlbUrl,
-    loadGlbEntity
+    loadGlbEntity,
+    loadGlbEntityWithTransform,
+    runBoundedConcurrency
 } from './glb-utils';
 import { RealEstateHUD } from './hud';
-import { loadRealEstateBootstrap } from './loader';
-import type { PropertyPublicShareDto, RealEstateBootstrapResult } from './types';
+import { buildPropertyIndexMaps, loadRealEstateBootstrap } from './loader';
+import type { PropertyPublicShareDto, RealEstateBootstrapResult, SceneItemDto, SceneModelDto } from './types';
 import { attachContextLossListeners, checkWebGL2Support } from './webgl';
 
 export type CreateViewerFn = (options: CreateViewerOptions) => Promise<ViewerHandle>;
@@ -36,8 +44,19 @@ export interface RealEstateViewerHandle {
     destroy: () => void;
 }
 
+interface LoadedRoom {
+    key: string;
+    model: SceneModelDto;
+    entity: Entity;
+    asset: Asset | null;
+}
+
+const MULTI_ROOM_CONCURRENCY = 3;
+const ROOM_FLY_DURATION_SEC = 0.8;
+
 /**
  * Initializes the RealEstate3D experience with dual public/preview bootstrap,
+ * progressive MultiRoom .glb assembly loading (bounded concurrency = 3),
  * clean 3D-first Arabic RTL HUD + Details modal, Studio-matched orbit navigation,
  * 1-finger rotate / 2-finger pinch+pan mobile touch gestures, and WebGL2 fallback.
  */
@@ -55,17 +74,81 @@ export async function initRealEstateViewer(
     // 2. Fetch bootstrap data (public share or authenticated preview)
     const bootstrap: RealEstateBootstrapResult = await loadRealEstateBootstrap(currentUrl);
     const { property } = bootstrap;
-    let activeSceneId = bootstrap.activeSceneId || property.sceneConfig?.defaultSceneId || property.scenes[0]?.sceneId;
 
-    const activeSceneModel = property.scenes.find((s) => s.sceneId === activeSceneId) || property.scenes[0];
+    // MED-01: Build O(1) lookup maps keyed by instanceId || sceneId
+    const indexedMaps = buildPropertyIndexMaps(property);
+    const scenesByKey: Map<string, SceneModelDto> = property.scenesByKey ?? indexedMaps.scenesByKey;
+    const sceneItemsByKey: Map<string, SceneItemDto> = property.sceneItemsByKey ?? indexedMaps.sceneItemsByKey;
+
+    const getSceneKey = (s?: SceneModelDto | null): string => (s ? s.instanceId || s.sceneId : '');
+
+    let activeSceneId =
+        bootstrap.activeSceneId ||
+        property.defaultInstanceId ||
+        property.sceneConfig?.defaultSceneId ||
+        getSceneKey(property.scenes[0]);
+
+    const activeSceneModel = scenesByKey.get(activeSceneId) || property.scenes[0];
     if (!activeSceneModel) {
         throw new Error('No 3D scenes found for this property.');
     }
+    activeSceneId = getSceneKey(activeSceneModel);
+
+    const isMultiRoom =
+        property.assemblyMode === 'MultiRoom' &&
+        property.scenes.length > 0 &&
+        property.scenes.every((s) => s.format === 'glb' || isGlbUrl(s.signedModelUrl));
 
     let viewerHandle: ViewerHandle | null = null;
     let cleanupContextLoss: (() => void) | null = null;
     let currentGsplatEntity: Entity | null = null;
     let currentGsplatAsset: Asset | null = null;
+    let destroyed = false;
+
+    // MultiRoom runtime registries (O(1) lookup)
+    const loadedRooms = new Map<string, LoadedRoom>();
+    const pendingRoomLoads = new Map<string, Promise<LoadedRoom | null>>();
+    let apartmentBbox: BoundingBox | null = null;
+
+    const refreshApartmentBounds = () => {
+        if (!viewerHandle || loadedRooms.size === 0) return;
+        const entities: Entity[] = [];
+        for (const room of loadedRooms.values()) {
+            entities.push(room.entity);
+        }
+        apartmentBbox = computeUnifiedBoundingBox(entities);
+        if (apartmentBbox) {
+            viewerHandle.events.fire('realestate:setAssemblyBbox', apartmentBbox);
+        }
+    };
+
+    const resolvePoseForRoom = (
+        roomKey: string,
+        targetEntity?: Entity | null,
+        explicitPose?: { position: number[]; lookAt: number[]; fov?: number }
+    ): { position: number[]; target: number[]; fov: number } | null => {
+        if (explicitPose?.position?.length >= 3 && explicitPose?.lookAt?.length >= 3) {
+            return {
+                position: explicitPose.position,
+                target: explicitPose.lookAt,
+                fov: explicitPose.fov ?? 50
+            };
+        }
+
+        const sceneItem = sceneItemsByKey.get(roomKey);
+        const sceneModel = scenesByKey.get(roomKey);
+        const saved = sceneItem?.spawnPose ?? sceneItem?.defaultSpawnPose ?? sceneModel?.spawnPose;
+        if (saved?.position?.length >= 3 && saved?.lookAt?.length >= 3) {
+            return {
+                position: saved.position,
+                target: saved.lookAt,
+                fov: saved.fov ?? 50
+            };
+        }
+
+        const entity = targetEntity ?? loadedRooms.get(roomKey)?.entity ?? null;
+        return computeStudioOrbitPose(entity);
+    };
 
     const applyStudioOrbitForScene = (sceneId: string, targetEntity?: Entity | null, immediate = false) => {
         if (!viewerHandle) return;
@@ -73,13 +156,13 @@ export async function initRealEstateViewer(
         viewerHandle.state.animationPaused = true;
         viewerHandle.state.cameraMode = 'orbit';
 
-        const sceneItem = property.sceneConfig?.scenes?.find((s) => s.sceneId === sceneId);
-        const saved = sceneItem?.defaultSpawnPose;
-        if (saved?.position?.length >= 3 && saved?.lookAt?.length >= 3) {
+        const resolved = resolvePoseForRoom(sceneId, targetEntity);
+        if (resolved) {
             viewerHandle.events.fire('realestate:gotoPose', {
-                position: saved.position,
-                target: saved.lookAt,
-                fov: 50,
+                position: resolved.position,
+                target: resolved.target,
+                fov: resolved.fov,
+                duration: ROOM_FLY_DURATION_SEC,
                 immediate
             });
             return;
@@ -93,6 +176,7 @@ export async function initRealEstateViewer(
                 position: computed.position,
                 target: computed.target,
                 fov: computed.fov,
+                duration: ROOM_FLY_DURATION_SEC,
                 immediate
             });
         } else {
@@ -106,7 +190,23 @@ export async function initRealEstateViewer(
             await switchRoom(roomId);
         },
         onResetCamera: () => {
-            applyStudioOrbitForScene(activeSceneId, null, false);
+            if (isMultiRoom && apartmentBbox && viewerHandle) {
+                const overview = computeOrbitPoseForBound(apartmentBbox);
+                if (overview) {
+                    viewerHandle.state.gamingControls = false;
+                    viewerHandle.state.animationPaused = true;
+                    viewerHandle.state.cameraMode = 'orbit';
+                    viewerHandle.events.fire('realestate:gotoPose', {
+                        position: overview.position,
+                        target: overview.target,
+                        fov: overview.fov,
+                        duration: ROOM_FLY_DURATION_SEC,
+                        immediate: false
+                    });
+                    return;
+                }
+            }
+            applyStudioOrbitForScene(activeSceneId, loadedRooms.get(activeSceneId)?.entity ?? null, false);
         },
         onHotspotClicked: async (targetSceneId: string, targetPose?: { position: number[]; lookAt: number[] }) => {
             await switchRoom(targetSceneId, targetPose);
@@ -124,12 +224,12 @@ export async function initRealEstateViewer(
             hud,
             property,
             activeSceneId,
-            switchRoom: async () => {},
+            switchRoom: async () => undefined,
             destroy: () => hud.destroy()
         };
     }
 
-    // 4. Create PlayCanvas Viewer instance in pure Studio-matched Orbit mode (no built-in SuperSplat UI clutter)
+    // 4. Create PlayCanvas Viewer instance in pure Studio-matched Orbit mode
     try {
         const initialFilename = extractFilename(
             activeSceneModel.signedModelUrl,
@@ -138,13 +238,14 @@ export async function initRealEstateViewer(
         const contentFilename = initialFilename.toLowerCase().endsWith('.glb')
             ? initialFilename
             : initialFilename.toLowerCase().endsWith('.sog') || initialFilename.toLowerCase().endsWith('.ply')
-                ? initialFilename
-                : isGlbUrl(activeSceneModel.signedModelUrl)
-                    ? 'scene.glb'
-                    : 'scene.sog';
+              ? initialFilename
+              : isGlbUrl(activeSceneModel.signedModelUrl)
+                ? 'scene.glb'
+                : 'scene.sog';
 
-        const initialSceneItem = property.sceneConfig?.scenes?.find((s) => s.sceneId === activeSceneId);
-        const initialSpawn = initialSceneItem?.defaultSpawnPose;
+        const initialSceneItem = sceneItemsByKey.get(activeSceneId);
+        const initialSpawn =
+            initialSceneItem?.spawnPose ?? initialSceneItem?.defaultSpawnPose ?? activeSceneModel.spawnPose;
         const viewerSettings = defaultSettings('environment');
         if (initialSpawn?.position?.length >= 3 && initialSpawn?.lookAt?.length >= 3) {
             viewerSettings.cameras = [
@@ -160,7 +261,7 @@ export async function initRealEstateViewer(
                             Number(initialSpawn.lookAt[1]) || 1.6,
                             Number(initialSpawn.lookAt[2]) || 0
                         ],
-                        fov: 50
+                        fov: initialSpawn.fov ?? 50
                     }
                 }
             ];
@@ -188,29 +289,110 @@ export async function initRealEstateViewer(
         const app = viewerHandle.app;
         const canvas = app.graphicsDevice.canvas as HTMLCanvasElement;
 
-        const applySceneTransforms = (entity: Entity | null, sceneId: string) => {
+        const applySceneTransforms = (entity: Entity | null, sceneKey: string) => {
             if (!entity) return;
-            const sceneItem = property.sceneConfig?.scenes?.find((s) => s.sceneId === sceneId);
-            if (sceneItem?.floorEulerDeg && sceneItem.floorEulerDeg.length >= 3) {
+            const sceneItem = sceneItemsByKey.get(sceneKey);
+            const sceneModel = scenesByKey.get(sceneKey);
+            const transform = sceneItem?.transform ?? sceneModel?.transform;
+            if (transform) {
+                applyTransformToEntity(entity, transform);
+            } else if (sceneItem?.floorEulerDeg && sceneItem.floorEulerDeg.length >= 3) {
                 entity.setLocalEulerAngles(
                     sceneItem.floorEulerDeg[0],
                     sceneItem.floorEulerDeg[1],
                     sceneItem.floorEulerDeg[2]
                 );
             }
-            applyCropBoundsToEntity(entity, sceneItem?.cropBounds ?? null);
+            applyLocalCropBoundsToEntity(entity, sceneItem?.cropBounds ?? sceneModel?.cropBounds ?? null);
             app.renderNextFrame = true;
         };
 
+        const loadRemainingRoomsProgressively = async () => {
+            if (!isMultiRoom || !viewerHandle || destroyed) return;
+
+            const remaining = property.scenes.filter((s) => getSceneKey(s) !== activeSceneId);
+            const totalRooms = property.scenes.length;
+            let loadedCount = loadedRooms.size;
+
+            if (remaining.length === 0) {
+                hud.setLoadingProgress(totalRooms, totalRooms);
+                return;
+            }
+
+            hud.setLoadingProgress(loadedCount, totalRooms);
+
+            await runBoundedConcurrency(remaining, MULTI_ROOM_CONCURRENCY, async (roomModel) => {
+                if (destroyed || !viewerHandle) return;
+                const key = getSceneKey(roomModel);
+                const sceneItem = sceneItemsByKey.get(key);
+                const filename = extractFilename(roomModel.signedModelUrl, `${key}.glb`);
+
+                const loadPromise: Promise<LoadedRoom | null> = loadGlbEntityWithTransform(
+                    app,
+                    roomModel.signedModelUrl,
+                    sceneItem?.transform ?? roomModel.transform ?? null,
+                    key,
+                    filename,
+                    undefined,
+                    () => destroyed
+                )
+                    .then(({ entity, asset }): LoadedRoom | null => {
+                        if (destroyed) {
+                            app.assets.remove(asset);
+                            asset.unload();
+                            entity.destroy();
+                            return null;
+                        }
+                        applyLocalCropBoundsToEntity(entity, sceneItem?.cropBounds ?? roomModel.cropBounds ?? null);
+                        const loaded: LoadedRoom = { key, model: roomModel, entity, asset };
+                        loadedRooms.set(key, loaded);
+                        loadedCount = loadedRooms.size;
+                        hud.setLoadingProgress(loadedCount, totalRooms);
+                        refreshApartmentBounds();
+                        app.renderNextFrame = true;
+                        return loaded;
+                    })
+                    .catch((err): LoadedRoom | null => {
+                        console.warn(`[RealEstate3D] Failed to load room ${key}:`, err);
+                        loadedCount++;
+                        hud.setLoadingProgress(Math.min(loadedCount, totalRooms), totalRooms);
+                        return null;
+                    })
+                    .finally(() => {
+                        pendingRoomLoads.delete(key);
+                    });
+
+                pendingRoomLoads.set(key, loadPromise);
+                await loadPromise;
+            });
+
+            hud.setLoadingProgress(totalRooms, totalRooms);
+            refreshApartmentBounds();
+        };
+
         let initialFramed = false;
+        let progressiveStarted = false;
         const finalizeInitialRoom = () => {
             const glbEntity = app.root.findByName(GLB_ENTITY_NAME) as Entity | null;
             if (glbEntity) {
                 applySceneTransforms(glbEntity, activeSceneId);
+                if (isMultiRoom && !loadedRooms.has(activeSceneId)) {
+                    loadedRooms.set(activeSceneId, {
+                        key: activeSceneId,
+                        model: activeSceneModel,
+                        entity: glbEntity,
+                        asset: null
+                    });
+                    refreshApartmentBounds();
+                }
             }
             if (!initialFramed && (viewerHandle?.state.loaded || glbEntity)) {
                 initialFramed = true;
                 applyStudioOrbitForScene(activeSceneId, glbEntity, true);
+            }
+            if (isMultiRoom && !progressiveStarted && (viewerHandle?.state.loaded || glbEntity)) {
+                progressiveStarted = true;
+                void loadRemainingRoomsProgressively();
             }
         };
 
@@ -230,30 +412,60 @@ export async function initRealEstateViewer(
             hud.setCameraEntity(cameraEntity);
         }
 
-        // Update 3D hotspot projection on each render frame
+        // Update 3D hotspot projection on each render frame (MED-01: O(1) lookup inside HUD)
         app.on('update', () => {
             if (cameraEntity) {
                 hud.updateHotspotScreenPositions(cameraEntity);
             }
         });
-    } catch (err: any) {
+    } catch (err: unknown) {
         console.error('[RealEstate3D] Error creating viewer:', err);
-        hud.showFallbackCard('تعذر تشغيل المشهد ثلاثي الأبعاد: ' + (err?.message || 'خطأ غير معروف'));
+        const msg = err instanceof Error ? err.message : 'خطأ غير معروف';
+        hud.showFallbackCard(`تعذر تشغيل المشهد ثلاثي الأبعاد: ${msg}`);
     }
 
-    // Function to cleanly switch rooms in RoomByRoom or multi-scene walkthrough
+    // Switch rooms: smooth 0.8s fly-to in MultiRoom mode; memory-safe disposal in SingleScan mode
     async function switchRoom(roomId: string, targetPose?: { position: number[]; lookAt: number[] }) {
-        if (roomId === activeSceneId || !viewerHandle) return;
-
-        const nextModel = property.scenes.find((s) => s.sceneId === roomId);
+        if (!viewerHandle) return;
+        const nextModel = scenesByKey.get(roomId);
         if (!nextModel) return;
+
+        if (isMultiRoom) {
+            activeSceneId = roomId;
+            hud.setActiveScene(roomId);
+
+            // If room is still downloading in background queue, wait for it cleanly
+            const pending = pendingRoomLoads.get(roomId);
+            if (pending) {
+                await pending;
+            }
+
+            const loaded = loadedRooms.get(roomId);
+            const pose = resolvePoseForRoom(roomId, loaded?.entity ?? null, targetPose);
+            if (pose) {
+                viewerHandle.state.gamingControls = false;
+                viewerHandle.state.animationPaused = true;
+                viewerHandle.state.cameraMode = 'orbit';
+                viewerHandle.events.fire('realestate:gotoPose', {
+                    position: pose.position,
+                    target: pose.target,
+                    fov: pose.fov,
+                    duration: ROOM_FLY_DURATION_SEC,
+                    immediate: false
+                });
+            }
+            viewerHandle.app.renderNextFrame = true;
+            return;
+        }
+
+        if (roomId === activeSceneId) return;
 
         activeSceneId = roomId;
         hud.setActiveScene(roomId);
 
         const app = viewerHandle.app;
 
-        // Prevent mobile OOM: destroy previous room's WebGL2 buffers & assets before loading next room
+        // Legacy SingleScan path: destroy previous room's WebGL2 buffers & assets before loading next room
         try {
             if (currentGsplatAsset) {
                 app.assets.remove(currentGsplatAsset);
@@ -271,7 +483,7 @@ export async function initRealEstateViewer(
                 const { entity, asset } = await loadGlbEntity(app, nextModel.signedModelUrl, glbFilename);
                 currentGsplatEntity = entity;
                 currentGsplatAsset = asset;
-                const sceneItem = property.sceneConfig?.scenes?.find((s) => s.sceneId === roomId);
+                const sceneItem = sceneItemsByKey.get(roomId);
                 if (sceneItem?.floorEulerDeg && sceneItem.floorEulerDeg.length >= 3) {
                     entity.setLocalEulerAngles(
                         sceneItem.floorEulerDeg[0],
@@ -279,7 +491,7 @@ export async function initRealEstateViewer(
                         sceneItem.floorEulerDeg[2]
                     );
                 }
-                applyCropBoundsToEntity(entity, sceneItem?.cropBounds ?? null);
+                applyLocalCropBoundsToEntity(entity, sceneItem?.cropBounds ?? null);
             } else {
                 const rawName = extractFilename(nextModel.signedModelUrl, 'scene.sog');
                 const filename =
@@ -315,6 +527,7 @@ export async function initRealEstateViewer(
                     position: targetPose.position,
                     target: targetPose.lookAt,
                     fov: 50,
+                    duration: ROOM_FLY_DURATION_SEC,
                     immediate: false
                 });
             } else {
@@ -322,17 +535,28 @@ export async function initRealEstateViewer(
             }
 
             app.renderNextFrame = true;
-        } catch (err: any) {
+        } catch (err: unknown) {
             console.error('[RealEstate3D] Failed to switch room:', err);
         }
     }
 
     const destroy = () => {
+        destroyed = true;
         if (cleanupContextLoss) {
             cleanupContextLoss();
             cleanupContextLoss = null;
         }
         if (viewerHandle) {
+            const app = viewerHandle.app;
+            for (const room of loadedRooms.values()) {
+                if (room.asset) {
+                    app.assets.remove(room.asset);
+                    room.asset.unload();
+                }
+                room.entity.destroy();
+            }
+            loadedRooms.clear();
+            pendingRoomLoads.clear();
             viewerHandle.destroy();
             viewerHandle = null;
         }
@@ -348,3 +572,12 @@ export async function initRealEstateViewer(
         destroy
     };
 }
+
+export { clampPointToBox } from '../camera-manager';
+export {
+    applyLocalCropBoundsToEntity,
+    computeLocalCropPlanes,
+    computeOrbitPoseForBound,
+    computeUnifiedBoundingBox,
+    runBoundedConcurrency
+} from './glb-utils';

@@ -1,5 +1,7 @@
+import type { GraphNode } from 'playcanvas';
 import { Vec3 } from 'playcanvas';
-import type { PropertyPublicShareDto, SceneItemDto } from './types';
+
+import type { PropertyPublicShareDto, SceneItemDto, SceneModelDto } from './types';
 
 export interface RealEstateHUDCallbacks {
     onSelectRoom: (roomId: string) => void;
@@ -17,13 +19,18 @@ const escapeHtml = (value: unknown): string => {
         .replace(/'/g, '&#39;');
 };
 
+const tmpWorldVec = new Vec3();
+
 export class RealEstateHUD {
     private container: HTMLElement;
     private property: PropertyPublicShareDto;
     private activeSceneId: string;
     private callbacks: RealEstateHUDCallbacks;
     private rootElement: HTMLElement | null = null;
-    private hotspotElements: Map<string, HTMLElement> = new Map();
+    private hotspotElements = new Map<string, HTMLElement>();
+    private sceneItemsByKey = new Map<string, SceneItemDto>();
+    private scenesByKey = new Map<string, SceneModelDto>();
+    private pillElements = new Map<string, HTMLElement>();
     private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
 
     constructor(
@@ -36,10 +43,40 @@ export class RealEstateHUD {
         this.property = property;
         this.activeSceneId = initialSceneId;
         this.callbacks = callbacks;
+        this.rebuildIndexMaps();
         this.render();
     }
 
-    public setCameraEntity(_camera: any) {
+    private rebuildIndexMaps() {
+        this.sceneItemsByKey.clear();
+        this.scenesByKey.clear();
+
+        if (this.property.sceneItemsByKey) {
+            for (const [k, v] of this.property.sceneItemsByKey) {
+                this.sceneItemsByKey.set(k, v);
+            }
+        } else {
+            for (const s of this.property.sceneConfig?.scenes || []) {
+                const key = s.instanceId || s.sceneId;
+                if (key) this.sceneItemsByKey.set(key, s);
+                if (s.sceneId && s.sceneId !== key) this.sceneItemsByKey.set(s.sceneId, s);
+            }
+        }
+
+        if (this.property.scenesByKey) {
+            for (const [k, v] of this.property.scenesByKey) {
+                this.scenesByKey.set(k, v);
+            }
+        } else {
+            for (const s of this.property.scenes || []) {
+                const key = s.instanceId || s.sceneId;
+                if (key) this.scenesByKey.set(key, s);
+                if (s.sceneId && s.sceneId !== key) this.scenesByKey.set(s.sceneId, s);
+            }
+        }
+    }
+
+    public setCameraEntity(_camera: unknown) {
         // Maintained for backwards compatibility with callers
     }
 
@@ -49,8 +86,27 @@ export class RealEstateHUD {
         this.renderHotspots();
     }
 
-    public updateHotspotScreenPositions(camera: any) {
-        if (!camera?.camera) return;
+    public setLoadingProgress(loaded: number, total: number) {
+        if (!this.rootElement) return;
+        const badge = this.rootElement.querySelector<HTMLElement>('.re-loading-badge');
+        if (!badge) return;
+
+        if (total <= 1 || loaded >= total) {
+            badge.style.display = 'none';
+            badge.textContent = '';
+            return;
+        }
+
+        badge.style.display = 'inline-flex';
+        badge.textContent = `جاري تحميل الغرف ${loaded} / ${total}...`;
+    }
+
+    public updateHotspotScreenPositions(
+        camera: GraphNode | { camera?: { worldToScreen: (v: Vec3) => Vec3 } } | null | undefined
+    ) {
+        const cam = (camera as { camera?: { worldToScreen: (v: Vec3) => Vec3 } } | null | undefined)?.camera;
+        if (!cam) return;
+        // MED-01: O(1) Map lookup per frame instead of Array.find()
         const scene = this.getCurrentSceneItem();
         if (!scene?.hotspots) return;
 
@@ -59,8 +115,8 @@ export class RealEstateHUD {
             if (!el) continue;
 
             const pos = hs.position;
-            const worldVec = new Vec3(pos[0], pos[1], pos[2]);
-            const screenVec = camera.camera.worldToScreen(worldVec);
+            tmpWorldVec.set(pos[0], pos[1], pos[2]);
+            const screenVec = cam.worldToScreen(tmpWorldVec);
 
             if (screenVec.z > 0) {
                 el.style.display = 'flex';
@@ -116,16 +172,17 @@ export class RealEstateHUD {
     }
 
     private getCurrentSceneItem(): SceneItemDto | undefined {
-        return this.property.sceneConfig?.scenes?.find((s) => s.sceneId === this.activeSceneId);
+        return this.sceneItemsByKey.get(this.activeSceneId);
     }
 
     private updatePillActiveStates() {
-        if (!this.rootElement) return;
-        const pills = this.rootElement.querySelectorAll('.re-room-pill');
-        pills.forEach((p) => {
-            const rid = p.getAttribute('data-room-id');
-            p.classList.toggle('active', rid === this.activeSceneId);
-        });
+        for (const [rid, pill] of this.pillElements) {
+            const isActive = rid === this.activeSceneId;
+            pill.classList.toggle('active', isActive);
+            if (isActive && typeof pill.scrollIntoView === 'function') {
+                pill.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+            }
+        }
     }
 
     private renderHotspots() {
@@ -140,9 +197,10 @@ export class RealEstateHUD {
         if (!scene?.hotspots || !scene.hotspots.length) return;
 
         for (const hs of scene.hotspots) {
+            const targetKey = hs.targetInstanceId || hs.targetSceneId;
             const pin = document.createElement('div');
             pin.className = 're-hotspot-pin';
-            pin.setAttribute('data-target-scene', hs.targetSceneId);
+            pin.setAttribute('data-target-scene', targetKey);
             pin.innerHTML = `
                 <div class="re-hotspot-dot"></div>
                 <span class="re-hotspot-label">${escapeHtml(hs.label)}</span>
@@ -150,7 +208,7 @@ export class RealEstateHUD {
 
             pin.addEventListener('click', (e) => {
                 e.stopPropagation();
-                this.callbacks.onHotspotClicked(hs.targetSceneId, hs.targetPose);
+                this.callbacks.onHotspotClicked(targetKey, hs.targetPose);
             });
 
             container.appendChild(pin);
@@ -181,6 +239,7 @@ export class RealEstateHUD {
                     <span class="re-btn-icon">ℹ</span>
                     <span>تفاصيل</span>
                 </button>
+                <span class="re-loading-badge" style="display:none" aria-live="polite"></span>
                 <button class="re-pill-btn re-reset-btn" type="button" title="إعادة ضبط الكاميرا" aria-label="إعادة ضبط الكاميرا">
                     <span>⌖ إعادة ضبط</span>
                 </button>
@@ -189,19 +248,21 @@ export class RealEstateHUD {
             <!-- Interactive Room Transition Hotspots -->
             <div class="re-hotspots-layer"></div>
 
-            <!-- Compact Bottom Room Switcher -->
+            <!-- Compact Bottom Quick-Jump Room Pills -->
             <nav class="re-bottom-pills-bar" aria-label="غرف العقار">
                 <div class="re-pills-scroll">
                     ${this.property.scenes
-                        .map(
-                            (s) => `
-                        <button class="re-room-pill ${s.sceneId === this.activeSceneId ? 'active' : ''}"
-                                data-room-id="${escapeHtml(s.sceneId)}"
+                        .map((s) => {
+                            const key = s.instanceId || s.sceneId;
+                            const label = s.displayLabel || s.label;
+                            return `
+                        <button class="re-room-pill ${key === this.activeSceneId ? 'active' : ''}"
+                                data-room-id="${escapeHtml(key)}"
                                 type="button">
-                            ${escapeHtml(s.label)}
+                            ${escapeHtml(label)}
                         </button>
-                    `
-                        )
+                    `;
+                        })
                         .join('')}
                 </div>
             </nav>
@@ -301,12 +362,16 @@ export class RealEstateHUD {
             window.addEventListener('keydown', this.keydownHandler);
         }
 
-        // Room switching pills
-        const pills = root.querySelectorAll('.re-room-pill');
+        // Room switching pills (indexed in pillElements Map for O(1) active state updates)
+        this.pillElements.clear();
+        const pills = root.querySelectorAll<HTMLElement>('.re-room-pill');
         pills.forEach((p) => {
+            const rid = p.getAttribute('data-room-id');
+            if (rid) {
+                this.pillElements.set(rid, p);
+            }
             p.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const rid = p.getAttribute('data-room-id');
                 if (rid && rid !== this.activeSceneId) {
                     this.setActiveScene(rid);
                     this.callbacks.onSelectRoom(rid);
@@ -342,5 +407,8 @@ export class RealEstateHUD {
             this.rootElement = null;
         }
         this.hotspotElements.clear();
+        this.pillElements.clear();
+        this.sceneItemsByKey.clear();
+        this.scenesByKey.clear();
     }
 }
