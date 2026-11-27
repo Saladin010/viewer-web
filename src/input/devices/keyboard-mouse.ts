@@ -213,7 +213,7 @@ class KeyboardMouseDevice implements InputDevice {
             // a boolean trigger.
             v.y = this._jump > 0 ? 1 : 0;
         }
-        screenToWorld(cameraComponent, mouse[0], mouse[1], distance, panMove);
+        screenToWorld(cameraComponent, mouse[0], mouse[1], Math.max(1.5, distance), panMove);
         v.add(panMove.mulScalar(pan));
         wheelMove.set(0, 0, -wheel[0]);
         v.add(wheelMove.mulScalar(this.wheelSpeed * DISPLACEMENT_SCALE));

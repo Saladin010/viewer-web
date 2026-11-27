@@ -482,7 +482,7 @@ class CameraManager {
 
         events.on('realestate:lockOrbit', (locked: boolean) => {
             orbitLocked = Boolean(locked);
-            controllers.orbit.controller.zoomRange.set(orbitLocked ? 0.25 : 0.01, orbitLocked ? 120 : Infinity);
+            controllers.orbit.controller.zoomRange.set(0.01, orbitLocked ? 120 : Infinity);
         });
 
         // Allow RealEstate host to configure soft apartment bounding-box clamping

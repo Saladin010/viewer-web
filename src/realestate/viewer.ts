@@ -121,8 +121,8 @@ export async function initRealEstateViewer(
     };
 
     const adaptFovForViewport = (baseFov: number, aspect: number): number => {
-        if (aspect < 0.85) {
-            return Math.min(78, baseFov / Math.max(0.65, aspect * 1.15));
+        if (aspect < 1) {
+            return Math.min(78, Math.round(baseFov / Math.max(0.64, aspect * 1.15)));
         }
         return baseFov;
     };

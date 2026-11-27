@@ -13,9 +13,9 @@ const flyRotate = new Vec3();
 class TouchDevice implements InputDevice {
     orbitSpeed = 18;
 
-    pinchSpeed = 0.4;
+    pinchSpeed = 0.9;
 
-    touchRotateSensitivity = 1.5;
+    touchRotateSensitivity = 0.7;
 
     private _source = new MultiTouchSource();
 
@@ -132,6 +132,7 @@ class TouchDevice implements InputDevice {
         const orbit = isOrbit ? 1 : 0;
         const fly = isFirstPerson ? 1 : 0;
         const double = this._touchCount > 1 ? 1 : 0;
+        const fingerReleasedToSingle = count[0] < 0 && this._touchCount === 1 ? 0 : 1;
         const orbitFactor = isFirstPerson ? cameraComponent.fov / 120 : 1;
         const dragInvert = isFirstPerson && !gamingControls ? -1 : 1;
         // First-person modes (fly and walk) opt into the direct two-finger
@@ -143,11 +144,9 @@ class TouchDevice implements InputDevice {
         // move
         const v = tmpV.set(0, 0, 0);
         // Two-finger pan: orbit pans the target; fly strafes/rises in the
-        // camera basis; walk strafes along the ground plane. Identical 1:1
-        // screen-space mapping in every mode so dragging feels the same —
-        // what your fingers move, the camera moves. Walk zeros y because
-        // WalkController treats any nonzero move[1] as a jump trigger.
-        screenToWorld(cameraComponent, touch[0], touch[1], distance, orbitMove);
+        // camera basis; walk strafes along the ground plane. Keep pan responsive
+        // even when zoomed all the way inside a room (distance = 0.01m).
+        screenToWorld(cameraComponent, touch[0], touch[1], Math.max(1.5, distance), orbitMove);
         if (isWalk) {
             orbitMove.y = 0;
         }
@@ -167,18 +166,24 @@ class TouchDevice implements InputDevice {
 
         // rotate
         v.set(0, 0, 0);
-        // single-touch orbit rotate (masked when there are 2+ touches)
+        // single-touch orbit rotate (masked when 2+ touches or on 2->1 finger release transition)
         orbitRotate.set(touch[0], touch[1], 0);
         v.add(
             orbitRotate.mulScalar(
-                orbit * (1 - double) * this.orbitSpeed * this.touchRotateSensitivity * DISPLACEMENT_SCALE
+                orbit * (1 - double) * fingerReleasedToSingle * this.orbitSpeed * this.touchRotateSensitivity * DISPLACEMENT_SCALE
             )
         );
         // single-touch fly look (inverted in non-gaming first-person)
         flyRotate.set(touch[0] * dragInvert, touch[1] * dragInvert, 0);
         v.add(
             flyRotate.mulScalar(
-                fly * (1 - double) * this.orbitSpeed * orbitFactor * this.touchRotateSensitivity * DISPLACEMENT_SCALE
+                fly *
+                    (1 - double) *
+                    fingerReleasedToSingle *
+                    this.orbitSpeed *
+                    orbitFactor *
+                    this.touchRotateSensitivity *
+                    DISPLACEMENT_SCALE
             )
         );
         deltas.rotate.append([v.x, v.y, v.z]);

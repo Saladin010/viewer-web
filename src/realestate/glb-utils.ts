@@ -339,11 +339,9 @@ export const computeOrbitPoseForBound = (
     aspect = 16 / 9
 ): { position: number[]; target: number[]; fov: number } | null => {
     if (!bound) return null;
-    const fov = 50;
-    const halfV = (fov * Math.PI) / 180 / 2;
     const safeAspect = Number.isFinite(aspect) && aspect > 0 ? Math.max(0.35, aspect) : 16 / 9;
-    const effectiveHalf = Math.min(halfV, Math.atan(Math.tan(halfV) * safeAspect));
-    const distance = Math.max(2.0, Math.min(50, (bound.halfExtents.length() * 1.1) / Math.tan(effectiveHalf)));
+    const fov = safeAspect < 1 ? Math.min(78, Math.round(50 / Math.max(0.64, safeAspect * 1.15))) : 50;
+    const distance = Math.max(1.6, Math.min(25, bound.halfExtents.length() * (safeAspect < 1 ? 2.0 : 1.6)));
     const az = (35 * Math.PI) / 180;
     const el = (-20 * Math.PI) / 180;
     const cosEl = Math.cos(el);

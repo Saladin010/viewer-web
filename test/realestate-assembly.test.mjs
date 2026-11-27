@@ -299,10 +299,11 @@ describe('RealEstate3D Multi-Room Assembly Engine', () => {
 
         const desktopDist = new Vec3(...desktopPose.position).distance(new Vec3(...desktopPose.target));
         const mobileDist = new Vec3(...mobilePose.position).distance(new Vec3(...mobilePose.target));
-        assert.ok(desktopDist >= 2.0);
+        assert.strictEqual(desktopPose.fov, 50);
+        assert.ok(mobilePose.fov >= 70, `Expected mobile portrait fov >= 70, got ${mobilePose.fov}`);
         assert.ok(
-            mobileDist > desktopDist * 1.5,
-            `Expected portrait mobile orbit distance (${mobileDist}) to pull back farther than desktop (${desktopDist})`
+            mobileDist >= desktopDist && mobileDist <= desktopDist * 1.6,
+            `Expected mobileDist (${mobileDist}) in [desktopDist (${desktopDist}), ${desktopDist * 1.6}]`
         );
     });
 });
